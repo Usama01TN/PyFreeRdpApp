@@ -1,0 +1,333 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching the version in pyproject.toml and PyFreeRdpApp/metadata.py):
+#   tests -> build -> install check on Linux/Windows/macOS -> publish -> GitHub Release.
+# Where a tag publishes is the repository variable PYPI_AUTO_TARGET (testpypi | pypi | none;
+# testpypi when unset). "Run workflow" (workflow_dispatch) picks the target by hand; publishing and
+# GitHub Releases need a tag, a dry run (target none, no release) works from any branch.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish (publishing needs a tag ref).
+        type: choice
+        options: [none, testpypi, pypi]
+        default: none
+      github-release:
+        description: Create the GitHub Release (needs a tag ref).
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # Never interrupt a publication.
+
+jobs:
+  version:
+    name: Version and plan
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      target: ${{ steps.plan.outputs.target }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the version and decide what this run does
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TARGET: ${{ inputs.target }}
+          INPUT_RELEASE: ${{ inputs.github-release }}
+          AUTO_TARGET: ${{ vars.PYPI_AUTO_TARGET }}
+        run: |
+          python - <<'EOF'
+          import ast, os, re, sys, tomllib
+
+          def fail(message):
+              print('::error::' + message)
+              sys.exit(1)
+
+          with open('pyproject.toml', 'rb') as fh:
+              version = tomllib.load(fh)['project']['version']
+          with open('PyFreeRdpApp/metadata.py', encoding='utf-8') as fh:
+              tree = ast.parse(fh.read())
+          meta = next((node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                       and any(getattr(t, 'id', '') == '__version__' for t in node.targets)), None)
+          if meta != version:
+              fail('version mismatch: pyproject.toml says %s, PyFreeRdpApp/metadata.py says %s' % (version, meta))
+
+          tag = os.environ['REF_NAME'] if os.environ['REF_TYPE'] == 'tag' else None
+          if tag is not None and tag != 'v' + version:
+              fail('tag %s does not match the version %s (expected tag v%s)' % (tag, version, version))
+
+          if os.environ['EVENT'] == 'push':
+              target = (os.environ.get('AUTO_TARGET') or 'testpypi').strip().lower()
+              release = True
+          else:
+              target = os.environ.get('INPUT_TARGET') or 'none'
+              release = os.environ.get('INPUT_RELEASE') == 'true'
+          if target not in ('none', 'testpypi', 'pypi'):
+              fail('PYPI_AUTO_TARGET must be testpypi, pypi or none, not %r' % target)
+          if (target != 'none' or release) and tag is None:
+              fail('publishing and GitHub Releases need a tag ref: run this from tag v%s' % version)
+
+          prerelease = bool(re.search(r'(a|b|rc|\.dev)\d*$', version))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('version=%s\nprerelease=%s\ntarget=%s\nrelease=%s\n'
+                        % (version, str(prerelease).lower(), target, str(release).lower()))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('### PyFreeRdpApp %s\n\n| | |\n|---|---|\n| publish to | %s |\n'
+                            '| GitHub Release | %s |\n| pre-release | %s |\n'
+                            % (version, target, 'yes' if release else 'no', 'yes' if prerelease else 'no'))
+          print('version %s -> publish: %s, GitHub Release: %s, pre-release: %s' % (version, target, release, prerelease))
+          EOF
+
+  ci:
+    name: Tests
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      pyfreerdpnative-tag: ${{ vars.PYFREERDPNATIVE_TAG || '' }}
+
+  build:
+    name: Build sdist and wheel
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Absolute README links (PyPI cannot show the repository's relative images)
+        run: |
+          python - <<'EOF'
+          import os, re
+          repo, ref = os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_REF_NAME']
+          raw = 'https://raw.githubusercontent.com/%s/%s/' % (repo, ref)
+          blob = 'https://github.com/%s/blob/%s/' % (repo, ref)
+
+          def absolute(path):
+              if re.match(r'^(?:[a-z][a-z0-9+.-]*:|#|/)', path, re.I):
+                  return path  # Already absolute, an anchor, or site-relative.
+              path = path[2:] if path.startswith('./') else path
+              return (raw if re.search(r'\.(?:png|jpe?g|gif|svg|webp)$', path, re.I) else blob) + path
+
+          with open('README.md', encoding='utf-8', newline='') as fh:
+              text = fh.read()
+          text = re.sub(r'(src=")([^"]+)(")', lambda m: m.group(1) + absolute(m.group(2)) + m.group(3), text)
+          text = re.sub(r'(\]\()([^)\s]+)(\))', lambda m: m.group(1) + absolute(m.group(2)) + m.group(3), text)
+          with open('README.md', 'w', encoding='utf-8', newline='') as fh:
+              fh.write(text)
+          print('README links now point to %s@%s' % (repo, ref))
+          EOF
+
+      - name: Build
+        run: |
+          python -m pip install --disable-pip-version-check build twine
+          python -m build
+          python -m twine check --strict dist/*
+
+      - name: Check the wheel's contents
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python - <<'EOF'
+          import glob, os, sys, zipfile
+          version = os.environ['VERSION']
+          wheels = glob.glob('dist/*.whl')
+          if len(wheels) != 1 or not wheels[0].endswith('-%s-py3-none-any.whl' % version):
+              sys.exit('::error::expected one PyFreeRdpApp-%s-py3-none-any.whl, got %s' % (version, wheels))
+          names = set(zipfile.ZipFile(wheels[0]).namelist())
+          required = ['PyFreeRdpApp/__main__.py', 'PyFreeRdpApp/__init__.pyi', 'PyFreeRdpApp/_serverinfo.py',
+                      'PyFreeRdpApp/rdpwidget/rdpwidgetplugin.py', 'PyFreeRdpApp/rdpwidget/register_rdpwidget.py',
+                      'PyFreeRdpApp/rdpwidget/disconnectdialog.py', 'PyFreeRdpApp/rdpwidget/images/pyfreerdpapp.ico',
+                      'PyFreeRdpApp/rdpwidget/images/pyfreerdpapp.svg']
+          required += ['PyFreeRdpApp/rdpwidget/images/pyfreerdpapp-%d.png' % s for s in (16, 24, 32, 48, 64, 128, 256, 512)]
+          missing = [n for n in required if n not in names]
+          if missing:
+              sys.exit('::error::missing from the wheel: %s' % ', '.join(missing))
+          stray = [n for n in names if n.startswith(('tests/', 'tools/', 'assets/')) or '__pycache__' in n]
+          if stray:
+              sys.exit('::error::should not be in the wheel: %s' % ', '.join(sorted(stray)))
+          print('wheel ok: %s (%d files)' % (os.path.basename(wheels[0]), len(names)))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  verify:
+    name: Install the wheel (${{ matrix.os }})
+    needs: [version, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4  # Only for the install-pyfreerdpnative action.
+        with:
+          sparse-checkout: .github/actions
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+
+      - uses: ./.github/actions/install-pyfreerdpnative
+        with:
+          tag: ${{ vars.PYFREERDPNATIVE_TAG || '' }}
+
+      - name: Install the built wheel and run it
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python -m pip install --disable-pip-version-check dist/*.whl
+          python - <<'EOF'
+          import os
+          from importlib.metadata import version
+          import PyFreeRdpApp
+          assert version('PyFreeRdpApp') == os.environ['VERSION'] == PyFreeRdpApp.__version__
+          try:  # Qt is the optional [qt] extra: without it, the widget package refuses cleanly.
+              import PyFreeRdpApp.rdpwidget
+              raise SystemExit('the widget imported without Qt installed?')
+          except ImportError:
+              pass
+          images = os.path.join(os.path.dirname(PyFreeRdpApp.__file__), 'rdpwidget', 'images')
+          missing = [s for s in (16, 24, 32, 48, 64, 128, 256, 512)
+                     if not os.path.exists(os.path.join(images, 'pyfreerdpapp-%d.png' % s))]
+          assert not missing, 'icon sizes missing: %s' % missing
+          print('installed PyFreeRdpApp %s: import, metadata and icons ok; without Qt the widget refuses cleanly'
+                % PyFreeRdpApp.__version__)
+          EOF
+          pyfreerdpapp --help > /dev/null
+          echo "command line ok"
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [version, ci, build, verify]
+    if: needs.version.outputs.target == 'testpypi'
+    runs-on: ubuntu-24.04
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/PyFreeRdpApp/${{ needs.version.outputs.version }}/
+    permissions:
+      id-token: write  # Trusted Publishing.
+    steps:
+      - name: Is pyfreerdpnative installable from an index?
+        run: |
+          for index in https://test.pypi.org/simple/ https://pypi.org/simple/; do
+            if python3 -m pip download --quiet --no-deps --dest "$RUNNER_TEMP/probe" --index-url "$index" pyfreerdpnative 2>/dev/null; then
+              echo "pyfreerdpnative found on $index"; exit 0
+            fi
+          done
+          echo "::warning::pyfreerdpnative is on neither TestPyPI nor PyPI: 'pip install PyFreeRdpApp' from TestPyPI will not resolve its dependency until it is published."
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true  # Re-running a release must not fail on TestPyPI.
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [version, ci, build, verify]
+    if: needs.version.outputs.target == 'pypi'
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/PyFreeRdpApp/${{ needs.version.outputs.version }}/
+    permissions:
+      id-token: write  # Trusted Publishing.
+    steps:
+      - name: Is pyfreerdpnative installable from PyPI?
+        run: |
+          if ! python3 -m pip download --quiet --no-deps --dest "$RUNNER_TEMP/probe" --index-url https://pypi.org/simple/ pyfreerdpnative; then
+            echo "::error::pyfreerdpnative is not on PyPI: 'pip install PyFreeRdpApp' would fail for everyone. Publish pyfreerdpnative to PyPI first (PyPI does not accept direct-URL dependencies)."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub Release
+    needs: [version, ci, build, verify, publish-testpypi, publish-pypi]
+    # After the publication (when there is one): skipped publish jobs are fine, failed ones are not.
+    if: >-
+      always() && needs.version.outputs.release == 'true' &&
+      needs.ci.result == 'success' && needs.build.result == 'success' && needs.verify.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.publish-testpypi.result) &&
+      contains(fromJSON('["success", "skipped"]'), needs.publish-pypi.result)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          TARGET: ${{ needs.version.outputs.target }}
+        run: |
+          case "$TARGET" in
+            pypi)     install="pip install PyFreeRdpApp==${VERSION}" ;;
+            testpypi) install="pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ PyFreeRdpApp==${VERSION}" ;;
+            *)        install="pip install PyFreeRdpApp-${VERSION}-py3-none-any.whl  (attached below)" ;;
+          esac
+          cat > notes.md <<NOTES
+          Install:
+
+          \`\`\`
+          ${install}
+          \`\`\`
+
+          PyFreeRdpApp needs [pyfreerdpnative](https://github.com/Usama01TN/PyFreeRdpNative) (FreeRDP 3).
+          NOTES
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            echo "release $TAG existed: files updated"
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "PyFreeRdpApp $VERSION" \
+              --notes-file notes.md --generate-notes "${flags[@]}"
+          fi

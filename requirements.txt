@@ -1,0 +1,4 @@
+pyfreerdpnative
+numpy
+pillow
+ManyQt

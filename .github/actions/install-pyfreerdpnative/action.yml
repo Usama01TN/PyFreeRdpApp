@@ -1,0 +1,47 @@
+name: Install pyfreerdpnative
+description: >
+  Install PyFreeRdpApp's dependency pyfreerdpnative: from PyPI when it is published there,
+  otherwise the wheel for this runner from a PyFreeRdpNative GitHub release
+  (pyfreerdpnative-<version>-py3-none-<platform>.whl).
+
+inputs:
+  repository:
+    description: GitHub repository whose releases carry the pyfreerdpnative wheels.
+    default: Usama01TN/PyFreeRdpNative
+  tag:
+    description: Release tag to take the wheels from (empty = the latest release).
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install pyfreerdpnative
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPOSITORY: ${{ inputs.repository }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        if python -m pip install --disable-pip-version-check --quiet pyfreerdpnative 2>/dev/null; then
+          echo "pyfreerdpnative installed from PyPI"
+          exit 0
+        fi
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)     pattern='pyfreerdpnative-*-py3-none-manylinux*_x86_64.whl' ;;
+          Linux-ARM64)   pattern='pyfreerdpnative-*-py3-none-manylinux*_aarch64.whl' ;;
+          Windows-X64)   pattern='pyfreerdpnative-*-py3-none-win_amd64.whl' ;;
+          Windows-ARM64) pattern='pyfreerdpnative-*-py3-none-win_arm64.whl' ;;
+          macOS-ARM64)   pattern='pyfreerdpnative-*-py3-none-macosx_*_arm64.whl' ;;
+          macOS-X64)     pattern='pyfreerdpnative-*-py3-none-macosx_*_x86_64.whl' ;;
+          *) echo "::error::no pyfreerdpnative wheel for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+        esac
+        wheels="${RUNNER_TEMP}/pyfreerdpnative-wheels"
+        echo "pyfreerdpnative is not on PyPI: taking ${pattern} from ${REPOSITORY} ${TAG:-(latest release)}"
+        if ! gh release download ${TAG:+"$TAG"} --repo "$REPOSITORY" --pattern "$pattern" --dir "$wheels" --clobber; then
+          echo "::error::no ${pattern} in the ${TAG:-latest} release of ${REPOSITORY} - publish pyfreerdpnative first"
+          exit 1
+        fi
+        # Several manylinux levels may match: pip picks the best one for this runner.
+        python -m pip install --disable-pip-version-check --no-index --find-links "$wheels" pyfreerdpnative
+        python -m pip show pyfreerdpnative | head -2

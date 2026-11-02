@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]  # PEP 639 license expressions
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PyFreeRdpApp"
+version = "4.2.1"
+description = "A high-level RDP client built on pyfreerdpnative (FreeRDP 3)."
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "UsamaTN", email = "ininou.oussematn@gmail.com" }]
+license = "Apache-2.0"
+dependencies = ["pyfreerdpnative", "numpy"]
+
+[project.optional-dependencies]
+qt = ["ManyQt"]
+pillow = ["pillow"]
+
+[project.scripts]
+pyfreerdpapp = "PyFreeRdpApp.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["PyFreeRdpApp*"]
+
+[tool.setuptools.package-data]
+"PyFreeRdpApp.rdpwidget" = ["images/*.png", "images/*.svg", "images/*.ico", "images/*.icns"]
