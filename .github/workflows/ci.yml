@@ -15,6 +15,10 @@ on:
         description: Set by callers (github.event_name is the caller's event inside a called workflow).
         type: boolean
         default: true
+      ref:
+        description: Commit, tag or branch to test (empty = the commit that triggered the run).
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -36,6 +40,8 @@ jobs:
       QT_QPA_PLATFORM: offscreen  # The Qt widget tests run without a display.
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -63,6 +69,8 @@ jobs:
         os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
