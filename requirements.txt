@@ -1,3 +1,4 @@
+pyfreerdpnative
 numpy
 pillow
 ManyQt
