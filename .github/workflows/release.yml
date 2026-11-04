@@ -368,6 +368,6 @@ jobs:
             gh release upload "$TAG" dist/* --clobber
             echo "release $TAG existed: files updated"
           else
-            gh release create "$TAG" dist/* --title "PyFreeRdpApp $VERSION" \
+            gh release create "$TAG" dist/* --title "v$VERSION" \
               --notes-file notes.md --generate-notes "${flags[@]}"
           fi
