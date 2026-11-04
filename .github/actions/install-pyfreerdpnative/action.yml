@@ -9,7 +9,10 @@ inputs:
     description: GitHub repository whose releases carry the pyfreerdpnative wheels.
     default: Usama01TN/PyFreeRdpNative
   tag:
-    description: Release tag to take the wheels from (empty = the latest release).
+    description: >
+      Release tag to take the wheels from. Empty: the newest release that has the wheel for this runner -
+      pre-releases included (PyFreeRdpNative publishes its builds as pre-releases, and GitHub's
+      "latest release" never is one).
     default: ""
 
 runs:
@@ -37,11 +40,25 @@ runs:
           *) echo "::error::no pyfreerdpnative wheel for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
         esac
         wheels="${RUNNER_TEMP}/pyfreerdpnative-wheels"
-        echo "pyfreerdpnative is not on PyPI: taking ${pattern} from ${REPOSITORY} ${TAG:-(latest release)}"
-        if ! gh release download ${TAG:+"$TAG"} --repo "$REPOSITORY" --pattern "$pattern" --dir "$wheels" --clobber; then
-          echo "::error::no ${pattern} in the ${TAG:-latest} release of ${REPOSITORY} - publish pyfreerdpnative first"
+        if [ -n "$TAG" ]; then
+          tags="$TAG"
+        else
+          # Newest first, pre-releases included, drafts not: `gh release download` without a tag means
+          # GitHub's "latest release", which is never a pre-release - and PyFreeRdpNative's are.
+          tags="$(gh release list --repo "$REPOSITORY" --exclude-drafts --limit 30 --json tagName --jq '.[].tagName')"
+        fi
+        found=""
+        for tag in $tags; do
+          if gh release download "$tag" --repo "$REPOSITORY" --pattern "$pattern" --dir "$wheels" --clobber 2>/dev/null; then
+            found="$tag"
+            break
+          fi
+        done
+        if [ -z "$found" ]; then
+          echo "::error::no ${pattern} in ${TAG:-any release} of ${REPOSITORY} - publish pyfreerdpnative first"
           exit 1
         fi
+        echo "pyfreerdpnative is not on PyPI: ${pattern} from release ${found} of ${REPOSITORY}"
         # Several manylinux levels may match: pip picks the best one for this runner.
         python -m pip install --disable-pip-version-check --no-index --find-links "$wheels" pyfreerdpnative
         python -m pip show pyfreerdpnative | head -2
