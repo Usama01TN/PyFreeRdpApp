@@ -1081,7 +1081,7 @@ def test_missing_aad_helper_fails_start_with_the_reason(env, monkeypatch):
     app, mod, rec = env
 
     def noHelper(kind):
-        raise LookupError(u'The webview helper is not part of this FreeRDP build')
+        raise LookupError(u'the webview helper is not part of this FreeRDP build')
 
     monkeypatch.setattr(aad, u'helper', noHelper)
     app.setServer(u'h')
@@ -1091,23 +1091,37 @@ def test_missing_aad_helper_fails_start_with_the_reason(env, monkeypatch):
     assert u'not part of this FreeRDP build' in str(info.value)
 
 
-# Run in a fresh interpreter: which Qt modules does importing the package ADD, and who imported them?
+# Run in a fresh interpreter: which Qt modules does import the package ADD, and who imported them?
 _QT_IMPORT_PROBE = u'''
 import sys, traceback
+import linecache, tokenize  # Python 3.13+ imports tokenize lazily, at the first stack format: load it first
 QT = ("ManyQt", "PyQt", "PySide")
 before = set(m for m in sys.modules if m.startswith(QT))  # loaded at startup (sitecustomize, .pth): not ours
 chain = []
+busy = []
+
 class Spy(object):
     def find_spec(self, name, path=None, target=None):
-        stack = traceback.format_stack()[:-1]
+        # Only Qt names; and never re-entered: formatting a stack can import modules itself.
+        if busy or chain or not name.startswith(QT):
+            return None
+        busy.append(True)
+        try:
+            self.record(name)
+        finally:
+            busy.pop()
+        return None  # let the real finders import it
+
+    def record(self, name):
+        stack = traceback.format_stack()[:-2]
         # Only the import machinery innermost to THIS lookup tells what it is: importlib.util.find_spec only
         # looks (loads nothing); anything else imports. (An outer import - the package's own - is always there.)
         last = max(i for i, f in enumerate(stack) if "importlib" not in f)
         # "<frozen importlib.util>" (Python 3.11+) or ".../importlib/util.py"
         lookup = any("importlib" in f and "util" in f for f in stack[last + 1:])
-        if name.startswith(QT) and not chain and not lookup:  # the first real Qt import: who made it
+        if not lookup:  # the first real Qt import: who made it
             chain.extend(f for f in stack if "importlib" not in f)
-        return None  # let the real finders import it
+
 sys.meta_path.insert(0, Spy())
 import PyFreeRdpApp, PyFreeRdpApp.__main__
 print(sorted(m for m in sys.modules if m.startswith(QT) and m not in before))
