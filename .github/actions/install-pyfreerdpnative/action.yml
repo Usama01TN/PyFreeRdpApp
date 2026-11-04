@@ -61,4 +61,6 @@ runs:
         echo "pyfreerdpnative is not on PyPI: ${pattern} from release ${found} of ${REPOSITORY}"
         # Several manylinux levels may match: pip picks the best one for this runner.
         python -m pip install --disable-pip-version-check --no-index --find-links "$wheels" pyfreerdpnative
-        python -m pip show pyfreerdpnative | head -2
+        # The installed version, without a pipe: `pip show | head` breaks pip's pipe when head exits first,
+        # and with pipefail that fails the step (pip exits 120, "Pipe to stdout was broken").
+        python -c "from importlib.metadata import version; print('pyfreerdpnative', version('pyfreerdpnative'))"
