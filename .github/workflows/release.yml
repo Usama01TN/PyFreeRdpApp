@@ -11,12 +11,12 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Where to publish (publishing needs a tag ref).
+        description: Where to publish (needs "Use workflow from" set to the tag, e.g. v4.3.0).
         type: choice
         options: [none, testpypi, pypi]
         default: none
       github-release:
-        description: Create the GitHub Release (needs a tag ref).
+        description: Create the GitHub Release (needs "Use workflow from" set to the tag).
         type: boolean
         default: false
 
@@ -82,7 +82,9 @@ jobs:
           if target not in ('none', 'testpypi', 'pypi'):
               fail('PYPI_AUTO_TARGET must be testpypi, pypi or none, not %r' % target)
           if (target != 'none' or release) and tag is None:
-              fail('publishing and GitHub Releases need a tag ref: run this from tag v%s' % version)
+              fail('publishing and GitHub Releases need a tag, but this run is from %s %r. In "Run workflow", '
+                   'set "Use workflow from" to the tag v%s (Tags tab); or untick "GitHub Release" and keep the '
+                   'target "none" for a dry run from a branch.' % (os.environ['REF_TYPE'], os.environ['REF_NAME'], version))
 
           prerelease = bool(re.search(r'(a|b|rc|\.dev)\d*$', version))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
