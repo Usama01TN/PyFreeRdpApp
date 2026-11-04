@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]  # PEP 639 license expressions
+requires = ["setuptools"]  # PEP 639 license expressions.
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyFreeRdpApp"
-version = "4.2.1"
+version = "4.3.0"
 description = "A high-level RDP client built on pyfreerdpnative (FreeRDP 3)."
 readme = "README.md"
 requires-python = ">=3.8"

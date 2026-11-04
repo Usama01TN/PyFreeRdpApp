@@ -10,12 +10,13 @@ if dirname(__file__) not in path:
 
 try:
     from .rdpwidget import RDPWidget, frameToQimage, nativeToScancode, snapshotTree, localPaths, qtExec, appIcon, \
-        GRAPHICS_OPTIONS, BACKGROUND, FOREGROUND
+        GRAPHICS_OPTIONS, BACKGROUND, FOREGROUND, IMAGES, MIRRORED, ICON_SIZES
     from .disconnectdialog import DisconnectDialog
 except:
     from rdpwidget import RDPWidget, frameToQimage, nativeToScancode, snapshotTree, localPaths, qtExec, appIcon, \
-        GRAPHICS_OPTIONS, BACKGROUND, FOREGROUND
+        GRAPHICS_OPTIONS, BACKGROUND, FOREGROUND, IMAGES, MIRRORED, ICON_SIZES
     from disconnectdialog import DisconnectDialog
 
 __all__ = [u'RDPWidget', u'DisconnectDialog', u'frameToQimage', u'nativeToScancode', u'snapshotTree', u'appIcon',
-           u'GRAPHICS_OPTIONS', u'qtExec', u'localPaths']  # type: list[str]
+           u'GRAPHICS_OPTIONS', u'BACKGROUND', u'FOREGROUND', u'IMAGES', u'MIRRORED', u'ICON_SIZES', u'qtExec',
+           u'localPaths']  # type: list[str]

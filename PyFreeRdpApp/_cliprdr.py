@@ -451,6 +451,15 @@ class Clipboard(object):
         self._uploadStarted = False  # type: bool
         self._run(self._sendFormatList)
 
+    def uploadProgress(self):
+        """
+        :return: (tuple[int, int]) (bytes the remote side has received, bytes offered) of the files
+            on the remote clipboard.
+        """
+        files = [(i, size) for i, (name, isDir, size, mtime, full) in enumerate(self._localFiles)
+                 if not isDir and size]
+        return sum(min(self._served.get(i, 0), size) for i, size in files), sum(size for i, size in files)
+
     def uploadFinished(self):
         """
         :return: bool

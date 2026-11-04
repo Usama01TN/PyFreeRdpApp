@@ -195,8 +195,8 @@ def test_clipboard_file_round_trip(tmp_path):
     for entry in files:
         name, isDir = entry[0], entry[1]
         if not isDir:
-            with open(join(src, name), 'rb') as srcFile:
-                with open(join(out, name), 'rb') as out_file:
+            with open(join(src, name), u'rb') as srcFile:
+                with open(join(out, name), u'rb') as out_file:
                     assert srcFile.read() == out_file.read()
     assert decodeText(encodeText(u'x\ny')) == u'x\ny'
 
@@ -269,12 +269,12 @@ def test_main_prompts_only_when_incomplete(monkeypatch):
     from PyFreeRdpApp import __main__ as main
     import builtins
     asked = []
-    monkeypatch.setattr(builtins, 'input', lambda p='': (asked.append(p), 'x')[1])
-    monkeypatch.setattr(main, 'getpass', lambda p='': (asked.append(p), 'pw')[1])
-    a = main.askTerminal(main.parseArgs(['prog', 'h', 'u', 'p', '3390']))
+    monkeypatch.setattr(builtins, u'input', lambda p=u'': (asked.append(p), u'x')[1])
+    monkeypatch.setattr(main, u'getpass', lambda p=u'': (asked.append(p), u'pw')[1])
+    a = main.askTerminal(main.parseArgs([u'prog', u'h', u'u', u'p', u'3390']))
     assert asked == [] and a.port == 3390
-    a = main.askTerminal(main.parseArgs(['prog']))
-    assert a.host == 'x' and a.password == 'pw' and a.port == 3389
+    a = main.askTerminal(main.parseArgs([u'prog']))
+    assert a.host == u'x' and a.password == u'pw' and a.port == 3389
 
 
 # --- found by the first live session ------------------------------------------------
@@ -426,7 +426,7 @@ def test_sound_and_graphics_are_settings_not_cli_arguments(env):
     assert bools[FreeRDP_SupportGraphicsPipeline] is True and bools[FreeRDP_GfxH264] is True
     assert bools[FreeRDP_GfxProgressive] is True
     assert not [n for n, a, _ in rec.calls if n == u'freerdp_client_settings_parse_command_line']
-    if hasattr(rec.calls, 'clear'):
+    if hasattr(rec.calls, u'clear'):
         rec.calls.clear()
     else:
         rec.calls = []
@@ -437,7 +437,7 @@ def test_sound_and_graphics_are_settings_not_cli_arguments(env):
     bools = {a[1]: a[2] for n, a, _ in rec.calls if n == u'freerdp_settings_set_bool'}
     assert bools[FreeRDP_AudioPlayback] is False
     assert bools[FreeRDP_GfxH264] is False and bools[FreeRDP_SupportGraphicsPipeline] is True
-    if hasattr(rec.calls, 'clear'):
+    if hasattr(rec.calls, u'clear'):
         rec.calls.clear()
     else:
         rec.calls = []
@@ -497,17 +497,17 @@ def test_pcm_audio_option(env):
     app._applySettings(c_void_p(1))
     channels = [(n.rsplit(u'_', 2)[-2], list(a[2])[:a[1]]) for n, a, _ in rec.calls
                 if n in (u'freerdp_client_add_static_channel', u'freerdp_client_add_dynamic_channel')]
-    assert (u'static', [b'rdpsnd', b'format:1']) in channels
-    assert (u'dynamic', [b'rdpsnd', b'format:1']) in channels
-    assert (u'dynamic', [b'audin', b'format:1']) in channels
-    if hasattr(rec.calls, 'clear'):
+    assert (u'static', [b'rdpsnd', b'format:1', b'latency:50']) in channels
+    assert (u'dynamic', [b'rdpsnd', b'format:1', b'latency:50']) in channels
+    assert (u'dynamic', [b'audin', b'format:1']) in channels  # the playback buffer only
+    if hasattr(rec.calls, u'clear'):
         rec.calls.clear()
     else:
         rec.calls = []
     app.setSound(True, compressed=True)
     app._applySettings(c_void_p(1))
     channels = [list(a[2])[:a[1]] for n, a, _ in rec.calls if n == u'freerdp_client_add_static_channel']
-    assert [b'rdpsnd'] in channels
+    assert [b'rdpsnd', b'latency:50'] in channels
 
 
 def test_windows_crash_event_is_parsed():
@@ -603,18 +603,32 @@ def test_widget_configures_the_session_it_creates(env):
     assert app.getServer() == u'rdp.example.com' and app.getPort() == 3390 and app.getDisplaySize() == (1024, 768)
 
 
-def test_designer_plugin():
+def _designerWidget():
+    """
+    RDPWidget as Qt Designer sees it with the active binding: PyQt's plugin class (rdpwidgetplugin.py), or -
+    PySide has no plugin class - what register_rdpwidget.py registers. Skips only when the binding has no
+    QtDesigner module (importorskip gives the reason).
+    :return: QDesignerCustomWidgetInterface
+    """
     _qt()
-    importorskip(u'PyQt5.QtDesigner')
-    try:
-        from PyFreeRdpApp.rdpwidget.rdpwidgetplugin import RDPWidgetPlugin
-        from xml.dom.minidom import parseString
-        plugin = RDPWidgetPlugin()  # type: RDPWidgetPlugin
-        assert plugin.name() == u'RDPWidget' and plugin.includeFile() == u'PyFreeRdpApp.rdpwidget'
-        assert parseString(plugin.domXml()).getElementsByTagName(u'widget')[0].getAttribute(u'class') == u'RDPWidget'
-        assert plugin.createWidget(None).isDesignMode()
-    except:
-        skip(u'We cannot import RDPWidgetPlugin here!')
+    designer = importorskip(u'ManyQt.QtDesigner')
+    from PyFreeRdpApp.rdpwidget import rdpwidgetplugin
+    plugin = getattr(rdpwidgetplugin, u'RDPWidgetPlugin', None)
+    if plugin is not None:  # PyQt
+        return plugin()
+    from PyFreeRdpApp.rdpwidget.register_rdpwidget import registerRDPWidget  # PySide
+    assert registerRDPWidget()
+    return [w for w in designer.QPyDesignerCustomWidgetCollection.instance().customWidgets()
+            if w.name() == u'RDPWidget'][-1]
+
+
+def test_designer_plugin():
+    from xml.dom.minidom import parseString
+    plugin = _designerWidget()
+    assert plugin.name() == u'RDPWidget' and plugin.includeFile() == u'PyFreeRdpApp.rdpwidget'
+    assert plugin.group() == u'PyFreeRdpApp' and plugin.toolTip() == u'Remote desktop (FreeRDP)'
+    assert parseString(plugin.domXml()).getElementsByTagName(u'widget')[0].getAttribute(u'class') == u'RDPWidget'
+    assert plugin.createWidget(None).isDesignMode()  # Designer's instances never connect
 
 
 def test_compatibility_imports():
@@ -955,12 +969,10 @@ def test_icon_ships_and_reaches_designer():
         assert exists(join(IMAGES, name)), name
     sizes = [s.width() for s in appIcon().availableSizes()]
     assert sizes == list(ICON_SIZES)
-    importorskip(u'PyQt5.QtDesigner')
-    try:
-        from PyFreeRdpApp.rdpwidget.rdpwidgetplugin import RDPWidgetPlugin
-        assert [s.width() for s in RDPWidgetPlugin().icon().availableSizes()] == list(ICON_SIZES)
-    except:
-        skip(u'We cannot import RDPWidgetPlugin here!')
+    plugin = _designerWidget()
+    shown = [s.width() for s in plugin.icon().availableSizes()]
+    # PyQt's plugin returns appIcon(); PySide registers an icon FILE - the .ico, every size up to 256.
+    assert shown == list(ICON_SIZES) or (shown and set(shown) <= set(ICON_SIZES))
 
 
 # --- the crash report is about this process, once; the logon failure names the server ------
@@ -1001,3 +1013,498 @@ def test_logon_failure_names_the_computer_that_answered(env):
     assert u'check the password' in app._explainLogonFailure()
     app._challenge = None  # no challenge seen: still says what was sent
     assert u'user \'expert\' in domain \'WIN-NEW\'' in app._explainLogonFailure()
+
+
+
+# --- FreeRDP 3: Azure AD sign-in through an AAD helper, UDP multitransport, lazy Qt -------------
+
+def test_transport_flags_match_freerdp_cmdline(env):
+    """
+    setTransport writes what /multitransport:<mode> writes (client/common/cmdline.c).
+    """
+    try:
+        from pyfreerdpnative.freerdp.settings_keys import FreeRDP_SupportMultitransportUdp, FreeRDP_MultitransportFlags
+    except:
+        skip(u'Needs the FreeRDP 3.33 bindings')
+    from pyfreerdpnative.freerdp.settings_types import TRANSPORT_TYPE_UDP_FECR, SOFTSYNC_TCP_TO_UDP, \
+        TRANSPORT_TYPE_UDP_PREFERRED
+    app, mod, rec = env
+    expected = {u'udp': (True, TRANSPORT_TYPE_UDP_FECR | SOFTSYNC_TCP_TO_UDP),
+                u'udp-preferred': (True, TRANSPORT_TYPE_UDP_FECR | SOFTSYNC_TCP_TO_UDP | TRANSPORT_TYPE_UDP_PREFERRED),
+                u'tcp-only': (False, None), u'default': (None, None)}
+    for mode, (udp, flags) in expected.items():
+        rec.calls[:] = []
+        app.setTransport(mode)
+        app._applySettings(c_void_p(1))
+        bools = dict((a[1], a[2]) for n, a, _ in rec.calls if n == u'freerdp_settings_set_bool')
+        numbers = dict((a[1], a[2]) for n, a, _ in rec.calls if n == u'freerdp_settings_set_uint32')
+        assert bools.get(FreeRDP_SupportMultitransportUdp) == udp, mode
+        assert numbers.get(FreeRDP_MultitransportFlags) == flags, mode
+    with raises(ValueError):
+        app.setTransport(u'carrier-pigeon')
+
+
+def test_azure_ad_settings_and_freerdps_token_function(env, monkeypatch):
+    """
+    The helper path/user agent reach FreeRDP; GetAccessToken is FreeRDP's own C function.
+    """
+    aad = importorskip(u'pyfreerdpnative.aad')  # first: the names below need the FreeRDP 3.33 bindings
+    from pyfreerdpnative.freerdp.settings_keys import FreeRDP_AadAuthHelper, FreeRDP_AadAuthUserAgent, \
+        FreeRDP_AadSecurity
+    from pyfreerdpnative.freerdp.freerdp import freerdp
+    from os import environ
+    app, mod, rec = env
+    monkeypatch.setattr(
+        aad, u'helper', lambda kind: (u'/opt/helpers/freerdp-qt-aad-helper', {u'PYFREERDPAPP_TEST_QT': u'qt-lib-dir'}))
+    tokenFunction = CFUNCTYPE(c_int)(lambda: 0)
+    rec.client_helper_get_access_token = tokenFunction
+    instance = freerdp()
+    app._instance = pointer(instance)
+    app.setAzureAD(True, helper=u'qt', userAgent=u'UA/1.0')
+    environ.pop(u'PYFREERDPAPP_TEST_QT', None)
+    app._resolveAzureAD()
+    assert environ[u'PYFREERDPAPP_TEST_QT'] == u'qt-lib-dir'
+    app._applySettings(c_void_p(1))
+    strings = dict((a[1], a[2]) for n, a, _ in rec.calls if n == u'freerdp_settings_set_string')
+    bools = dict((a[1], a[2]) for n, a, _ in rec.calls if n == u'freerdp_settings_set_bool')
+    assert strings[FreeRDP_AadAuthHelper] == b'/opt/helpers/freerdp-qt-aad-helper'
+    assert strings[FreeRDP_AadAuthUserAgent] == b'UA/1.0' and bools[FreeRDP_AadSecurity] is True
+    assert cast(instance.GetAccessToken, c_void_p).value == cast(tokenFunction, c_void_p).value
+    app._resolveAzureAD()  # a retry must not save our own value as the original.
+    app._restoreAzureADEnvironment()
+    assert u'PYFREERDPAPP_TEST_QT' not in environ
+    assert app.getSessionInfo()[u'azureAD'][u'enabled'] is True
+
+
+def test_missing_aad_helper_fails_start_with_the_reason(env, monkeypatch):
+    aad = importorskip(u'pyfreerdpnative.aad')
+    app, mod, rec = env
+
+    def noHelper(kind):
+        raise LookupError(u'The webview helper is not part of this FreeRDP build')
+
+    monkeypatch.setattr(aad, u'helper', noHelper)
+    app.setServer(u'h')
+    app.setAzureAD(True)
+    with raises(ConnectionError) as info:
+        app.start()
+    assert u'not part of this FreeRDP build' in str(info.value)
+
+
+# Run in a fresh interpreter: which Qt modules does importing the package ADD, and who imported them?
+_QT_IMPORT_PROBE = u'''
+import sys, traceback
+QT = ("ManyQt", "PyQt", "PySide")
+before = set(m for m in sys.modules if m.startswith(QT))  # loaded at startup (sitecustomize, .pth): not ours
+chain = []
+class Spy(object):
+    def find_spec(self, name, path=None, target=None):
+        stack = traceback.format_stack()[:-1]
+        # Only the import machinery innermost to THIS lookup tells what it is: importlib.util.find_spec only
+        # looks (loads nothing); anything else imports. (An outer import - the package's own - is always there.)
+        last = max(i for i, f in enumerate(stack) if "importlib" not in f)
+        # "<frozen importlib.util>" (Python 3.11+) or ".../importlib/util.py"
+        lookup = any("importlib" in f and "util" in f for f in stack[last + 1:])
+        if name.startswith(QT) and not chain and not lookup:  # the first real Qt import: who made it
+            chain.extend(f for f in stack if "importlib" not in f)
+        return None  # let the real finders import it
+sys.meta_path.insert(0, Spy())
+import PyFreeRdpApp, PyFreeRdpApp.__main__
+print(sorted(m for m in sys.modules if m.startswith(QT) and m not in before))
+print("".join(chain[-8:]))
+'''
+
+
+def test_import_loads_no_qt():
+    """
+    The widget is imported on first use: the package and console mode never load Qt themselves. What the
+    interpreter loads before (a site customize or .pth startup hook) is the environment's, not the package's;
+    on failure, the message shows which file and line imported Qt.
+    """
+    import sys
+    out = check_output([sys.executable, u'-c', _QT_IMPORT_PROBE]).decode(u'utf-8', u'replace')
+    added, _, chain = out.partition(u'\n')
+    assert added.strip() == u'[]', u'importing PyFreeRdpApp loaded {} - imported from:\n{}'.format(added.strip(), chain)
+
+
+def test_azure_ad_needs_no_password():
+    import PyFreeRdpApp.__main__ as main
+    assert not main.needsInput(main.parseArgs([u'p', u'host.example', u'--azure-ad']))
+    assert main.needsInput(main.parseArgs([u'p', u'host.example']))
+
+
+# --- stop() keeps the last input; --upload puts a file on the remote desktop ------------------------
+
+def test_stop_delivers_queued_input_then_lingers(env, monkeypatch):
+    """
+    Input sent just before stop() used to vanish: it ran after the abort, and a close with server
+    updates unread is a TCP reset that drops what the server had not read yet.
+    """
+    from threading import Thread
+    from time import sleep
+    app, mod, rec = env
+
+    def rdpThread():
+        """
+        :return:
+        """
+        while not app._stop:
+            app._drain()
+            sleep(0.005)
+
+    thread = Thread(target=rdpThread)  # type: Thread
+    thread.daemon = True
+    thread.start()
+    app._thread, app._ready = thread, True
+    sentList = []
+    app._post(lambda: (sentList.append(u'key'), setattr(app, u'_lastInputAt', mod.monotonic())))
+    slept = []
+    monkeypatch.setattr(mod, u'sleep', lambda seconds: slept.append(seconds))
+    app.stop()
+    assert sentList == [u'key']  # Delivered while the connection was up
+    assert slept and 0 < slept[0] <= mod.INPUT_LINGER  # and given time to be read.
+
+
+def test_audio_latency_reaches_the_playback_channel(env):
+    """
+    A short rdpsnd buffer keeps sound with the picture (FreeRDP reports the real latency to the server).
+    """
+    app, mod, rec = env
+    for latency, expected in ((50, [b'rdpsnd', b'latency:50']), (120, [b'rdpsnd', b'latency:120']), (0, [b'rdpsnd'])):
+        rec.calls[:] = []
+        app.setAudioLatency(latency)
+        app.setSound(True)
+        app._applySettings(c_void_p(1))
+        channels = [list(a[2])[:a[1]] for n, a, _ in rec.calls if n == u'freerdp_client_add_static_channel']
+        assert expected in channels, latency  # 0: the backend's own default
+    with raises(ValueError):
+        app.setAudioLatency(5000)
+
+
+class _Clock(object):
+    """
+    A fast clock for the blocking session helpers: sleep() advances time instead of waiting.
+    """
+
+    def __init__(self):
+        self.now = 0.0  # type: float
+
+    def sleep(self, seconds):
+        """
+        :param seconds: float | int
+        :return:
+        """
+        self.now += max(seconds, 0.01)  # type: float
+
+    def monotonic(self):
+        """
+        :return: float | int
+        """
+        return self.now
+
+
+def _scriptedSession(env, monkeypatch, fileClipboard=True, pastes=True, size=1000):
+    """
+    A real RDPApplication whose input is recorded; Ctrl+V makes the remote side 'download'.
+    """
+    from PyFreeRdpApp.keyboard import KEY_V
+    app, mod, rec = env
+    clock = _Clock()
+    monkeypatch.setattr(mod, u'sleep', clock.sleep)
+    monkeypatch.setattr(mod, u'monotonic', clock.monotonic)
+    state = {u'served': 0, u'events': []}
+    cls = type(app)
+    monkeypatch.setattr(cls, u'isFileClipboardEnabled', property(lambda self: fileClipboard))
+    monkeypatch.setattr(cls, u'isFileTransferFinished', property(lambda self: state[u'served'] >= size))
+    monkeypatch.setattr(app, u'getFileTransferProgress', lambda: (state[u'served'], size))
+    monkeypatch.setattr(app, u'getDisplaySize', lambda: (800, 600))
+    monkeypatch.setattr(app, u'saveClipboard', lambda kind, data, *a: state[u'events'].append((u'clipboard', data)))
+    monkeypatch.setattr(app, u'leftMouseDown', lambda x, y: state[u'events'].append((u'down', x, y)))
+    monkeypatch.setattr(app, u'leftMouseUp', lambda x, y: state[u'events'].append((u'up', x, y)))
+    monkeypatch.setattr(app, u'typeText', lambda text, typingDelay=20: state[u'events'].append((u'type', text)))
+    monkeypatch.setattr(app, u'_checkConnected', lambda: None)
+
+    def hotkey(*codes, **kw):
+        state[u'events'].append((u'hotkey', codes))
+        if KEY_V in codes and pastes:
+            state[u'served'] = size
+
+    monkeypatch.setattr(app, u'hotkey', hotkey)
+    return app, state
+
+
+def test_upload_files_pastes_on_the_remote_desktop(env, monkeypatch, tmp_path):
+    from PyFreeRdpApp.keyboard import LEFT_WINDOW, KEY_D, LEFT_CONTROL, KEY_V
+    app, state = _scriptedSession(env, monkeypatch)
+    first, second = tmp_path / u'a.zip', tmp_path / u'b.txt'
+    first.write_bytes(b'x' * 10)
+    second.write_bytes(b'y')
+    seen = []
+    assert app.uploadFiles([str(first), str(second)], progress=lambda r, t: seen.append((r, t))) == 1000
+    kinds = [e[0] for e in state[u'events']]
+    assert kinds == [u'clipboard', u'hotkey', u'down', u'up', u'hotkey']
+    assert state[u'events'][0][1] == [str(first), str(second)]  # several files at once
+    assert state[u'events'][1] == (u'hotkey', (LEFT_WINDOW, KEY_D))
+    assert state[u'events'][4] == (u'hotkey', (LEFT_CONTROL, KEY_V))
+    assert seen[-1] == (1000, 1000)
+
+
+def test_upload_files_retries_without_toggling_the_desktop_back(env, monkeypatch, tmp_path):
+    """
+    Win+D is a toggle: a retry repeats only the click and Ctrl+V; nothing pasted -> TimeoutError.
+    """
+    from PyFreeRdpApp.keyboard import LEFT_WINDOW, KEY_D
+    app, state = _scriptedSession(env, monkeypatch, pastes=False)
+    target = tmp_path / u'a.zip'
+    target.write_bytes(b'x')
+    with raises(TimeoutError):
+        app.uploadFiles(str(target))
+    hotkeys = [e[1] for e in state[u'events'] if e[0] == u'hotkey']
+    assert hotkeys.count((LEFT_WINDOW, KEY_D)) == 1 and len(hotkeys) == 3
+
+
+def test_upload_files_errors(env, monkeypatch, tmp_path):
+    app, state = _scriptedSession(env, monkeypatch, fileClipboard=False)
+    target = tmp_path / u'a.zip'
+    target.write_bytes(b'x')
+    with raises(PermissionError):
+        app.uploadFiles(str(target))
+    with raises(FileNotFoundError):
+        app.uploadFiles(str(tmp_path / u'missing.zip'))
+
+
+def test_console_upload_exit_codes(monkeypatch, tmp_path):
+    import PyFreeRdpApp.__main__ as main
+    monkeypatch.setattr(main, u'sleep', lambda s: None)
+    target = tmp_path / u'a.zip'
+    target.write_bytes(b'x')
+
+    class App(object):
+        """
+        App class.
+        """
+
+        def __init__(self, outcome):
+            self.outcome = outcome
+
+        def uploadFiles(self, paths, timeout=0, progress=None):
+            """
+            :param paths: list[str | unicode]
+            :param timeout: int
+            :param progress: callable | None
+            :return: int
+            """
+            if self.outcome == u'incomplete':
+                progress(5, 10)
+            if isinstance(self.outcome, type):
+                raise self.outcome(u'x')
+            if self.outcome == u'incomplete':
+                raise TimeoutError(u'incomplete')
+            return 10
+
+    args = main.parseArgs([u'p', u'h', u'u', u'pw', u'--upload', str(target), u'--upload-wait', u'0'])
+    assert main.uploadToDesktop(App(None), args) == 0
+    assert main.uploadToDesktop(App(PermissionError), args) == 4
+    assert main.uploadToDesktop(App(TimeoutError), args) == 5  # nothing pasted.
+    assert main.uploadToDesktop(App(u'incomplete'), args) == 6  # started, not finished.
+    missing = main.parseArgs([u'p', u'h', u'u', u'pw', u'--upload', str(tmp_path / u'no.zip')])
+    assert main.uploadToDesktop(App(None), missing) == 2
+
+
+def test_widget_reports_uploads(env, monkeypatch, tmp_path):
+    from ManyQt.QtWidgets import QApplication
+    from time import sleep
+    QApplication.instance() or QApplication([])
+    from PyFreeRdpApp import RDPWidget
+    app, state = _scriptedSession(env, monkeypatch)
+    monkeypatch.setattr(type(app), u'isReady', property(lambda self: True))
+    widget = RDPWidget()
+    widget._RDPWidget__m_app = app
+    results = []
+    widget.uploadFinished.connect(lambda ok, message: results.append(ok))
+    target = tmp_path / u'a.zip'
+    target.write_bytes(b'x')
+    widget.uploadFiles([str(target)])
+    for _ in range(200):
+        QApplication.processEvents()
+        if results:
+            break
+        sleep(0.01)
+    assert results == [True]
+
+
+class _FakeRail(object):
+    """
+    A RemoteApp channel: records Client Execute orders; the 'server' answers through the app's handler.
+    """
+
+    def __init__(self, app, verdicts):
+        self.app, self.verdicts, self.orders = app, list(verdicts), []
+        outer = self
+
+        class Contents(object):
+            """
+            Contents class.
+            """
+
+            @staticmethod
+            def ClientExecute(rail, order):
+                o = order._obj
+                outer.orders.append((o.flags, o.RemoteApplicationProgram, o.RemoteApplicationArguments,
+                                     o.RemoteApplicationWorkingDir))
+                verdict = outer.verdicts.pop(0)
+
+                class Result(object):
+                    """
+                    Result class.
+                    """
+                    contents = type(u'R', (), {u'execResult': verdict, u'rawResult': 0x80070005 if verdict else 0})
+
+                outer.app._railExecuteResult(None, Result)
+                return 0
+
+        self.contents = Contents()  # type: Contents
+
+
+def test_run_command_goes_over_the_remoteapp_channel(env, monkeypatch):
+    """
+    No keyboard, no clipboard: a Client Execute order, and the server's verdict.
+    """
+    from pyfreerdpnative.freerdp.rail import RAIL_EXEC_S_OK, RAIL_EXEC_E_NOT_IN_ALLOWLIST
+    app, mod, rec = env
+    monkeypatch.setattr(app, u'_call', lambda fn, timeout=10.0: fn())
+    with raises(RuntimeError):  # a desktop session: RDP has no protocol way
+        app.runCommand(u'notepad')
+    app.setRemoteApp(u'notepad')
+    app._rail = _FakeRail(app, [RAIL_EXEC_S_OK, RAIL_EXEC_E_NOT_IN_ALLOWLIST])
+    app.runCommand(u'cmd', u'/k ipconfig', u'%USERPROFILE%')
+    assert app._rail.orders[0] == (mod.RAIL_EXEC_FLAGS, b'cmd', b'/k ipconfig', b'%USERPROFILE%')
+    assert mod.RAIL_EXEC_FLAGS == 0x0009  # expand arguments and working folder
+    with raises(RuntimeError) as info:
+        app.runCommand(u'blocked.exe')
+    assert u'does not allow this program' in str(info.value)
+    with raises(ValueError):
+        app.runCommand(u'  ')
+
+
+def test_wait_for_remoteapp_reports_the_server_answer(env):
+    from pyfreerdpnative.freerdp.rail import RAIL_EXEC_E_FILE_NOT_FOUND, RAIL_EXEC_S_OK
+    app, mod, rec = env
+    app.setRemoteApp(u'notepad')
+    app._execResults.append((RAIL_EXEC_E_FILE_NOT_FOUND, 2))
+    with raises(RuntimeError) as info:
+        app.waitForRemoteApp(timeout=0.1)
+    assert u'did not find the program' in str(info.value)
+    app._execResults[:] = [(RAIL_EXEC_S_OK, 0)]
+    app.waitForRemoteApp(timeout=0.1)
+
+
+def test_program_settings(env):
+    """
+    Alternate shell: sent with the logon. RemoteApp: FreeRDP then loads the rail channel.
+    """
+    from pyfreerdpnative.freerdp.settings_keys import FreeRDP_AlternateShell, FreeRDP_ShellWorkingDirectory, \
+        FreeRDP_RemoteApplicationMode, FreeRDP_RemoteApplicationProgram, FreeRDP_RemoteApplicationCmdLine
+    app, mod, rec = env
+    app.setStartProgram(u'cmd /k echo hi', u'C:\\Temp')
+    app._applySettings(c_void_p(1))
+    strings = dict((a[1], a[2]) for n, a, _ in rec.calls if n == u'freerdp_settings_set_string')
+    assert strings[FreeRDP_AlternateShell] == b'cmd /k echo hi' and strings[
+        FreeRDP_ShellWorkingDirectory] == b'C:\\Temp'
+    rec.calls[:] = []
+    app.setRemoteApp(u'notepad', u'C:\\notes.txt', u'%USERPROFILE%')
+    app._applySettings(c_void_p(1))
+    strings = dict((a[1], a[2]) for n, a, _ in rec.calls if n == u'freerdp_settings_set_string')
+    flags = dict((a[1], a[2]) for n, a, _ in rec.calls if n == u'freerdp_settings_set_bool')
+    assert flags[FreeRDP_RemoteApplicationMode] is True
+    assert strings[FreeRDP_RemoteApplicationProgram] == b'notepad'
+    assert strings[FreeRDP_RemoteApplicationCmdLine] == b'C:\\notes.txt'
+    assert FreeRDP_AlternateShell not in strings  # RemoteApp wins
+
+
+def test_console_program_options(env, monkeypatch):
+    import PyFreeRdpApp.__main__ as main
+    app, mod, rec = env
+    monkeypatch.setattr(main, u'RDPApplication', lambda: app)  # the fake FreeRDP: no libraries needed
+    args = main.parseArgs(
+        [u'p', u'h', u'u', u'pw', u'--app', u'notepad', u'--app-args', u'a.txt', u'--workdir', u'C:\\'])
+    assert main.buildApp(args).getRemoteApp() == (u'notepad', u'a.txt', u'C:\\')
+    args = main.parseArgs([u'p', u'h', u'u', u'pw', u'--shell', u'cmd'])
+    assert main.buildApp(args).getStartProgram() == (u'cmd', u'')
+    assert main.parseArgs([u'p', u'h']).audio_latency == 50
+
+    class Refused(object):
+        """
+        Refused class.
+        """
+
+        def waitForRemoteApp(self):
+            """
+            :return:
+            """
+            raise RuntimeError(u'refused')
+
+    assert main.reportRemoteApp(Refused(), main.parseArgs([u'p', u'h', u'--app', u'x'])) == 7
+
+
+def test_widget_runs_over_the_protocol(env, monkeypatch):
+    from ManyQt.QtWidgets import QApplication
+    from time import sleep
+    QApplication.instance() or QApplication([])
+    from PyFreeRdpApp import RDPWidget
+    app, mod, rec = env
+    monkeypatch.setattr(type(app), u'isReady', property(lambda self: True))
+    sentList = []
+    monkeypatch.setattr(app, u'runCommand', lambda program, arguments=u'', workingDir=u'': sentList.append(
+        (program, arguments, workingDir)))
+    widget = RDPWidget()
+    widget._RDPWidget__m_app = app
+    results = []
+    widget.commandFinished.connect(lambda ok, message: results.append((ok, message)))
+    widget.runCommand(u'cmd', u'/k ipconfig', u'C:\\Temp')
+    for _ in range(200):
+        QApplication.processEvents()
+        if results:
+            break
+        sleep(0.01)
+    assert sentList == [(u'cmd', u'/k ipconfig', u'C:\\Temp')] and results == [(True, u'cmd /k ipconfig')]
+
+
+def test_frames_are_presented_when_published_coalesced(env):
+    """
+    The RDP thread asks the GUI for a present once per burst, not once per paint.
+    """
+    from ManyQt.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from PyFreeRdpApp import RDPWidget
+    widget = RDPWidget()  # type: RDPWidget
+    emitted = []
+    widget._frameReady.connect(lambda: emitted.append(1))
+    from threading import Thread
+    worker = Thread(target=lambda: [widget._frameAvailable() for _ in range(5)])  # Like the RDP thread.
+    worker.start()
+    worker.join()  # Five paints published before the GUI thread runs.
+    QApplication.processEvents()
+    assert len(emitted) == 1
+
+
+def test_upload_is_console_only():
+    import PyFreeRdpApp.__main__ as main
+    assert main.isConsoleMode(main.parseArgs([u'p', u'host', u'u', u'pw', u'--upload', u'C:\\usama.zip']))
+
+
+
+def test_session_window_builds_with_run_after_connecting(env, monkeypatch):
+    """
+    The session window builds with a program to start (it once crashed on that path),
+    and has the Upload files / Run program buttons.
+    """
+    from ManyQt.QtWidgets import QApplication, QMessageBox, QToolBar
+    QApplication.instance() or QApplication([])
+    import PyFreeRdpApp.__main__ as main
+    app, mod, rec = env
+    monkeypatch.setattr(QMessageBox, u'warning', staticmethod(lambda *a, **k: 0))
+    args = main.parseArgs([u'p', u'h', u'u', u'pw', u'--app', u'notepad', u'--upload-wait', u'0'])
+    window = main.MainWindow(app, args)
+    names = [a.text() for a in window.findChildren(QToolBar)[0].actions()]
+    assert u'Upload files...' in names and u'Run program...' in names

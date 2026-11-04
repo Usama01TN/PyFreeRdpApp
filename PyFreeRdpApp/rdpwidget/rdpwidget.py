@@ -11,14 +11,22 @@ Features:
   * every connection option is a Qt property, so the widget is configurable in Qt Designer
     (see rdpwidgetplugin.py) without connecting there.
 """
+from ManyQt.QtWidgets import QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QLineEdit, QMenu, \
+    QMessageBox, QWidget
 from ManyQt.QtCore import Qt, QTimer, QSize, QRectF, pyqtSignal, pyqtSlot, pyqtProperty
 from ManyQt.QtGui import QCursor, QIcon, QImage, QPainter, QPixmap, QColor, QFont
-from ManyQt.QtWidgets import QApplication, QFileDialog, QMenu, QWidget
 from os.path import join, exists, dirname, basename, normpath
 from sys import platform, path
 from logging import getLogger
 from threading import Thread
 from os import walk
+
+try:
+    from time import monotonic
+except:
+    from time import time
+
+    monotonic = time
 
 if dirname(dirname(dirname(__file__))) not in path:
     path.append(dirname(dirname(dirname(__file__))))
@@ -31,15 +39,19 @@ except:
 _log = getLogger(u'PyFreeRdpApp.widget')
 GRAPHICS_OPTIONS = (u'auto', u'AVC444', u'AVC420', u'progressive', u'RFX', u'off')  # type: tuple
 BACKGROUND = QColor(u'#101418')  # type: QColor
+# Frames are presented when published; this timer only catches a missed notification.
+SAFETY_REFRESH_MS = 250  # type: int
 FOREGROUND = QColor(u'#9AA4AE')  # type: QColor
 
 
-def frameToQimage(frame):
+def frameToQimage(frame, copy=True):
     """
     RDPApplication.getDisplay() -> QImage.
     getDisplay() returns a NumPy array (height, width, bpp/8) of BGR(A) pixels;
     without NumPy a (width, height, channels, bytes) tuple. Both are accepted here.
     :param frame: (numpy.ndarray | tuple | None) The frame.
+    :param copy: (bool) False: the image uses the frame's bytes directly - for an image drawn at once,
+        while they are alive (the real-time path); True: an independent image.
     :return: QImage | None
     """
     if frame is None:
@@ -60,7 +72,8 @@ def frameToQimage(frame):
     else:
         # FreeRDP's BGR16 has blue in the high bits; Qt's RGB16 expects red there.
         return QImage(data, width, height, stride, QImage.Format_RGB16).rgbSwapped()
-    return QImage(data, width, height, stride, fmt).copy()
+    image = QImage(data, width, height, stride, fmt)  # type: QImage
+    return image.copy() if copy else image
 
 
 def nativeToScancode(api, nativeScancode, nativeVirtualKey):
@@ -176,6 +189,11 @@ class RDPWidget(QWidget):
     _pointer = pyqtSignal(u'QString', object)  # type: pyqtSignal
     _startFinished = pyqtSignal(bool, u'QString')  # type: pyqtSignal
     _stopFinished = pyqtSignal()  # type: pyqtSignal
+    _frameReady = pyqtSignal()  # type: pyqtSignal
+    # Results of runCommand / uploadFiles (both work on a worker thread).
+    commandFinished = pyqtSignal(bool, u'QString')  # type: pyqtSignal
+    uploadProgress = pyqtSignal(object, object)  # type: pyqtSignal  # (received, total) bytes
+    uploadFinished = pyqtSignal(bool, u'QString')  # type: pyqtSignal
     _lost = pyqtSignal(dict)  # type: pyqtSignal
 
     def __init__(self, *args, **kwargs):
@@ -193,10 +211,12 @@ class RDPWidget(QWidget):
         :param sound: (bool) Play the remote sound locally.
         :param microphone: (bool) Redirect the local microphone.
         :param compressedAudio: (bool) Allow compressed audio formats.
+        :param audioLatency: (int) Audio playback buffer in ms (default 50; 0 = the backend's default).
         :param autoReconnect: (bool) Reconnect automatically after a network failure.
         :param sharedDirectories: (list[str | unicode | QString] | QStringList) Local folders redirected as drives.
         :param freerdpCliArgs: (str | unicode | QString) Extra FreeRDP command line arguments.
-        :param fps: (int) Display refresh rate.
+        :param fps: (int) Most repaints per second (default 240). Frames are shown the moment they are
+            published; this only spaces repaints of a burst.
         :param syncClipboard: (bool) Synchronize the clipboards.
         :param autoConnect: (bool) Connect when the widget is first shown.
         :param designMode: (bool) Created by Qt Designer: never connects, paints a placeholder.
@@ -224,10 +244,11 @@ class RDPWidget(QWidget):
         sound = kwargs.pop(u'sound', True)  # type: bool
         microphone = kwargs.pop(u'microphone', False)  # type: bool
         compressedAudio = kwargs.pop(u'compressedAudio', True)  # type: bool
+        audioLatency = kwargs.pop(u'audioLatency', 50)  # type: int
         autoReconnect = kwargs.pop(u'autoReconnect', False)  # type: bool
         sharedDirectories = kwargs.pop(u'sharedDirectories', [])  # type: list
         freerdpCliArgs = kwargs.pop(u'freerdpCliArgs', u'')  # type: str
-        fps = kwargs.pop(u'fps', 60)  # type: int
+        fps = kwargs.pop(u'fps', 240)  # type: int
         syncClipboard = kwargs.pop(u'syncClipboard', True)  # type: bool
         autoConnect = kwargs.pop(u'autoConnect', False)  # type: bool
         paused = kwargs.pop(u'paused', False)  # type: bool
@@ -256,6 +277,9 @@ class RDPWidget(QWidget):
         self.__m_sound = bool(sound)  # type: bool
         self.__m_microphone = bool(microphone)  # type: bool
         self.__m_compressedAudio = bool(compressedAudio)  # type: bool
+        self.__m_audioLatency = max(0, min(2000, int(audioLatency)))  # type: int
+        self.__m_uploading = False  # type: bool
+        self.__m_lastCommand = u''  # type: str
         self.__m_autoReconnect = bool(autoReconnect)  # type: bool
         self.__m_sharedDirectories = [u'{}'.format(d) for d in sharedDirectories]  # type: list
         self.__m_freerdpCliArgs = u'{}'.format(freerdpCliArgs)  # type: str
@@ -293,6 +317,14 @@ class RDPWidget(QWidget):
         # Timing.
         self.__m_timer = QTimer(self)  # type: QTimer
         self.__m_timer.timeout.connect(self._refresh)
+        # Frames are shown when published (setFrameListener): no polling delay. The fps cap spaces
+        # repaints; __m_timer only stays as a slow safety net.
+        self.__m_presentPending = False  # type: bool
+        self.__m_lastPresent = 0.0  # type: float
+        self.__m_capTimer = QTimer(self)  # type: QTimer
+        self.__m_capTimer.setSingleShot(True)
+        self.__m_capTimer.timeout.connect(self._presentNow)
+        self._frameReady.connect(self._presentFrame)
         self.__m_pushTimer = QTimer(self)  # type: QTimer
         self.__m_pushTimer.timeout.connect(self._pushInitialClipboard)
         if not self.__m_designMode:
@@ -354,7 +386,8 @@ class RDPWidget(QWidget):
             app.setClipboardListener(lambda content: self.remoteClipboardChanged.emit(content))
         else:
             app.setClipboardListener(None)
-        self.__m_timer.start(max(1, int(1000 / float(self.__m_fps))))
+        app.setFrameListener(self._frameAvailable)
+        self.__m_timer.start(SAFETY_REFRESH_MS)
         if self.__m_syncClipboard:
             self.__m_pushTimer.start(500)
 
@@ -373,6 +406,7 @@ class RDPWidget(QWidget):
             self.setSound(app.isSound())
             self.setMicrophone(app.isMicrophone())
             self.setCompressedAudio(app.isCompressedAudio())
+            self.setAudioLatency(app.getAudioLatency())
             self.setSharedDirectories([folder for _name, folder in app.getSharedDirectories()])
             self.setFreerdpCliArgs(u' '.join(app.getFreerdpCliArgs()))
         finally:
@@ -403,6 +437,7 @@ class RDPWidget(QWidget):
             getattr(app, u'set' + name)(getattr(self, prefix + name)())
         app.setDisplaySize(self.__m_displayWidth, self.__m_displayHeight)
         app.setSound(self.__m_sound, microphone=self.__m_microphone, compressed=self.__m_compressedAudio)
+        app.setAudioLatency(self.__m_audioLatency)
         app.setFreerdpCliArgs(self.__m_freerdpCliArgs)
         if folders:
             for folder in self.__m_sharedDirectories:
@@ -640,6 +675,176 @@ class RDPWidget(QWidget):
         self._offerLocalClipboard(True)
 
     @pyqtSlot()
+    def getAudioLatency(self):
+        """
+        :return: (int) The audio playback buffer in milliseconds (0 = the backend's default).
+        """
+        return self.__m_audioLatency
+
+    @pyqtSlot(int)
+    def setAudioLatency(self, milliseconds):
+        """
+        A short playback buffer keeps the sound with the picture (FreeRDP reports the real latency
+        to the server, which syncs audio and video with it); raise it if the sound stutters.
+        :param milliseconds: (int) 0 to 2000; 0 = the audio backend's default. Applies on connect.
+        :return:
+        """
+        self.__m_audioLatency = max(0, min(2000, int(milliseconds)))  # type: int
+        self._sync()
+
+    @pyqtSlot(u'QString')
+    @pyqtSlot(u'QString', u'QString')
+    @pyqtSlot(u'QString', u'QString', u'QString')
+    def runCommand(self, program, arguments=u'', workingDir=u''):
+        """
+        Starts a program in a RemoteApp session through the RemoteApp channel (Client Execute - no keyboard,
+        no clipboard), on a worker thread; the server's answer comes as commandFinished(ok, message).
+        :param program: (str | unicode) The program, e.g. `cmd` or a full path.
+        :param arguments: (str | unicode) Its arguments (optional).
+        :param workingDir: (str | unicode) Its working folder (optional).
+        :return:
+        """
+        app = self.__m_app  # type: RDPApplication | None
+        if app is None or not app.isReady:
+            self.commandFinished.emit(False, self.tr(u'Not connected'))
+            return
+        program, arguments, workingDir = (u'{}'.format(x) for x in (program, arguments, workingDir))
+
+        def run():
+            """
+            :return: None
+            """
+            try:
+                app.runCommand(program, arguments, workingDir)
+            except Exception as exc:
+                self.commandFinished.emit(False, u'{}'.format(exc))
+                return
+            self.commandFinished.emit(True, u' '.join(filter(None, (program, arguments))))
+
+        Thread(target=run, daemon=True).start()
+
+    @pyqtSlot()
+    def chooseAndRunCommand(self):
+        """
+        Asks for a program, then starts it through the protocol: in a RemoteApp session at once; in a desktop
+        session - where RDP has no way to start one without the keyboard - after reconnecting as a RemoteApp
+        session running it, if the user agrees.
+        :return: None
+        """
+        app = self.__m_app  # type: RDPApplication | None
+        dialog = QDialog(self)  # type: QDialog
+        dialog.setWindowTitle(self.tr(u'Run program'))
+        program = QLineEdit(self.__m_lastCommand)  # type: QLineEdit
+        program.setPlaceholderText(self.tr(u'e.g. notepad, cmd or a full path'))
+        program.setMinimumWidth(360)
+        arguments = QLineEdit()  # type: QLineEdit
+        arguments.setPlaceholderText(self.tr(u'optional'))
+        folder = QLineEdit()  # type: QLineEdit
+        folder.setPlaceholderText(self.tr(u'optional, e.g. %USERPROFILE%'))
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)  # type: QDialogButtonBox
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form = QFormLayout(dialog)  # type: QFormLayout
+        form.addRow(self.tr(u'Program'), program)
+        form.addRow(self.tr(u'Arguments'), arguments)
+        form.addRow(self.tr(u'Working folder'), folder)
+        form.addRow(buttons)
+        if not qtExec(dialog) or not program.text().strip():
+            return
+        self.__m_lastCommand = program.text().strip()  # type: str
+        if app is not None and app.isRemoteApp():
+            self.runCommand(self.__m_lastCommand, arguments.text().strip(), folder.text().strip())
+            return
+        answer = QMessageBox.question(self, self.tr(u'Run program'), self.tr(
+            u'This is a desktop session: RDP starts a program without the keyboard only in a RemoteApp session.\n\n'
+            u'Reconnect as a RemoteApp session running {}? The server must allow it.').format(self.__m_lastCommand))
+        if answer != QMessageBox.Yes or app is None:
+            return
+        app.setRemoteApp(self.__m_lastCommand, arguments.text().strip(), folder.text().strip())
+        self._restartSession(self._reportRemoteApp)
+
+    def _reportRemoteApp(self):
+        """
+        Worker thread, after reconnecting as a RemoteApp session: the server's answer on its program.
+        :return:
+        """
+        try:
+            self.__m_app.waitForRemoteApp()
+        except Exception as exc:
+            self.commandFinished.emit(False, u'{}'.format(exc))
+        else:
+            self.commandFinished.emit(True, self.__m_lastCommand)
+
+    def _restartSession(self, then=None):
+        """
+        Reconnect on a worker thread, so new settings (shared folders, a RemoteApp) apply; then run `then`
+        there. sessionRestarted(ok) at the end; a failed reconnect is reported through clipboardError.
+        :param then: (callable | None) Run after the session is up again.
+        :return:
+        """
+        app = self.__m_app  # type: RDPApplication
+
+        def restart():
+            """
+            :return:
+            """
+            try:
+                app.stop()
+                app.start()
+                if then is not None:
+                    then()
+            finally:
+                self.sessionRestarted.emit(app.isReady)
+
+        self._background(restart, errorPrefix=self.tr(u'Reconnect failed: '))
+
+    @pyqtSlot('QStringList')
+    @pyqtSlot(list)
+    def uploadFiles(self, paths):
+        """
+        Uploads files or folders to the remote desktop (pasted there through the clipboard), on a
+        worker thread: uploadProgress(received, total) while the remote side downloads them, then
+        uploadFinished(ok, message). One upload at a time.
+        :param paths: (list[str | unicode | QString] | QStringList) Files and/or folders.
+        :return: None
+        """
+        app = self.__m_app  # type: RDPApplication | None
+        if app is None or not app.isReady:
+            self.uploadFinished.emit(False, self.tr(u'Not connected'))
+            return
+        if self.__m_uploading:
+            self.uploadFinished.emit(False, self.tr(u'An upload is already running'))
+            return
+        paths = [u'{}'.format(p) for p in paths]  # type: list[str]
+        self.__m_uploading = True  # type: bool
+
+        def run():
+            """
+            :return:
+            """
+            try:
+                total = app.uploadFiles(paths, progress=lambda done, size: self.uploadProgress.emit(done, size))
+            except Exception as exc:
+                self.uploadFinished.emit(False, u'{}'.format(exc))
+            else:
+                names = basename(paths[0]) if len(paths) == 1 else self.tr(u'{} items').format(len(paths))
+                self.uploadFinished.emit(True, self.tr(u'{} uploaded to the remote desktop ({:,} bytes)').format(
+                    names, total))
+            finally:
+                self.__m_uploading = False  # type: bool
+
+        Thread(target=run, daemon=True).start()
+
+    @pyqtSlot()
+    def chooseAndUploadFiles(self):
+        """
+        Asks for files, then uploads them to the remote desktop.
+        :return:
+        """
+        paths, _filter = QFileDialog.getOpenFileNames(self, self.tr(u'Upload files to the remote desktop'))
+        if paths:
+            self.uploadFiles(list(paths))
+
     def resendClipboard(self):
         """
         Offer the local clipboard again, even if it was already sent.
@@ -648,8 +853,8 @@ class RDPWidget(QWidget):
         self.__m_lastSynced = None
         self._offerLocalClipboard(True)
 
-    @pyqtSlot(list)
     @pyqtSlot(u'QStringList')
+    @pyqtSlot(list)
     def sendFiles(self, paths):
         """
         Put local files and folders on the remote clipboard, ready to paste in the remote session.
@@ -775,17 +980,7 @@ class RDPWidget(QWidget):
         if not app.isRunning:
             return
 
-        def restart():
-            """
-            :return:
-            """
-            try:
-                app.stop()
-                app.start()
-            finally:
-                self.sessionRestarted.emit(app.isReady)
-
-        self._background(restart, errorPrefix=self.tr(u'Reconnect failed: '))
+        self._restartSession()
 
     # ---------- Public API: properties ----------
 
@@ -1003,8 +1198,8 @@ class RDPWidget(QWidget):
         """
         return list(self.__m_sharedDirectories)
 
-    @pyqtSlot(list)
     @pyqtSlot(u'QStringList')
+    @pyqtSlot(list)
     def setSharedDirectories(self, sharedDirectories):
         """
         :param sharedDirectories: (list[str | unicode | QString] | QStringList)
@@ -1038,12 +1233,11 @@ class RDPWidget(QWidget):
     @pyqtSlot(int)
     def setFps(self, fps):
         """
-        :param fps: (int) Display refresh rate, 1 to 240.
+        :param fps: (int) Most repaints per second, 1 to 240 (default 240): frames are shown the moment
+            they are published, this only spaces the repaints of a burst. Lower it to save CPU.
         :return:
         """
-        self.__m_fps = max(1, min(240, int(fps)))  # type: int
-        if self.__m_timer.isActive():
-            self.__m_timer.start(max(1, int(1000 / float(self.__m_fps))))
+        self.__m_fps = max(1, min(240, int(fps)))  # type: int  # the repaint cap
 
     def isSyncClipboard(self):
         """
@@ -1092,7 +1286,7 @@ class RDPWidget(QWidget):
         :return:
         """
         self.__m_paused = bool(paused)  # type: bool
-        if hasattr(self.__m_app, 'setPaused'):
+        if hasattr(self.__m_app, u'setPaused'):
             self.__m_app.setPaused(self.__m_paused)
 
     def isDesignMode(self):
@@ -1144,6 +1338,38 @@ class RDPWidget(QWidget):
     # ---------- Display ----------
 
     @pyqtSlot()
+    def _frameAvailable(self):
+        """
+        RDP thread: a frame was published. Ask the GUI thread for one present - coalesced, so a
+        burst of paints costs one queued signal.
+        :return:
+        """
+        if not self.__m_presentPending:
+            self.__m_presentPending = True  # type: bool
+            self._frameReady.emit()
+
+    @pyqtSlot()
+    def _presentFrame(self):
+        """
+        GUI thread: show the newest frame now - or, within the fps cap, as soon as it allows.
+        :return:
+        """
+        self.__m_presentPending = False  # type: bool
+        wait = self.__m_lastPresent + 1.0 / self.__m_fps - monotonic()  # type: float
+        if wait > 0:
+            if not self.__m_capTimer.isActive():
+                self.__m_capTimer.start(int(wait * 1000) + 1)
+            return
+        self._presentNow()
+
+    @pyqtSlot()
+    def _presentNow(self):
+        """
+        :return:
+        """
+        self.__m_lastPresent = monotonic()  # type: float
+        self._refresh()
+
     def _refresh(self):
         """
         Real-time path: take only what changed since the last frame (a rectangle of packed rows,
@@ -1160,7 +1386,7 @@ class RDPWidget(QWidget):
         if self.__m_image is None or self.__m_image.width() != width or self.__m_image.height() != height:
             self.__m_image = QImage(width, height, QImage.Format_RGB32)  # type: QImage
             self.__m_image.fill(Qt.black)
-        patch = frameToQimage((w, h, channels, packed))  # type: QImage | None
+        patch = frameToQimage((w, h, channels, packed), copy=False)  # type: QImage | None  # drawn at once
         if patch is None:
             return
         painter = QPainter(self.__m_image)  # type: QPainter
@@ -1428,7 +1654,12 @@ class RDPWidget(QWidget):
             if image.width() == self.width() and image.height() == self.height():
                 painter.drawImage(e.rect(), image, e.rect())  # 1:1, no scaling.
             else:
-                painter.drawImage(self.rect(), image)  # Scaled, clipped to the update.
+                # Scaled: only the exposed part, from the matching part of the image.
+                rect = e.rect()  # type: QRect
+                sx = image.width() / float(self.width())  # type: float
+                sy = image.height() / float(self.height())  # type: float
+                painter.drawImage(QRectF(rect), image, QRectF(rect.x() * sx, rect.y() * sy,
+                                                              rect.width() * sx, rect.height() * sy))
             return
         self._paintPlaceholder(painter)
 
@@ -1474,6 +1705,7 @@ class RDPWidget(QWidget):
     sound = pyqtProperty(bool, fget=isSound, fset=setSound)  # type: pyqtProperty
     microphone = pyqtProperty(bool, fget=isMicrophone, fset=setMicrophone)  # type: pyqtProperty
     compressedAudio = pyqtProperty(bool, fget=isCompressedAudio, fset=setCompressedAudio)  # type: pyqtProperty
+    audioLatency = pyqtProperty(int, fget=getAudioLatency, fset=setAudioLatency)  # type: pyqtProperty
     autoReconnect = pyqtProperty(bool, fget=isAutoReconnect, fset=setAutoReconnect)  # type: pyqtProperty
     sharedDirectories = pyqtProperty(
         u'QStringList', fget=getSharedDirectories, fset=setSharedDirectories)  # type: pyqtProperty

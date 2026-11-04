@@ -4,7 +4,7 @@ Releases are built and published by `.github/workflows/release.yml` when a versi
 Publishing uses PyPI **Trusted Publishing** (OIDC): no API token is stored anywhere, and every upload
 gets PyPI attestations.
 
-## One-time setup
+## One-time setup:
 
 1. **pyfreerdpnative must be on PyPI first.** PyFreeRdpApp depends on it, and PyPI does not accept
    direct-URL dependencies: published without it, `pip install PyFreeRdpApp` would fail for
@@ -23,7 +23,7 @@ gets PyPI attestations.
    | `PYPI_AUTO_TARGET` | where a pushed tag publishes: `testpypi` (the default), `pypi` or `none` |
    | `PYFREERDPNATIVE_TAG` | the PyFreeRdpNative release whose wheels CI tests against (default: the latest), used while pyfreerdpnative is not on PyPI |
 
-## Each release
+## Each release:
 
 1. Set the same version in `pyproject.toml` (`version = "X.Y.Z"`) and
    `PyFreeRdpApp/metadata.py` (`__version__ = u'X.Y.Z'`), and commit.
@@ -47,7 +47,7 @@ The workflow then:
 
 A version like `X.Y.Zrc1`, `X.Y.Za1` or `X.Y.Zb1` becomes a GitHub *pre-release*.
 
-## By hand
+## By hand:
 
 *Actions > Release > Run workflow* runs the same pipeline with a chosen target. From any branch,
 target `none` is a dry run (tests, build, verify; nothing published). Publishing and GitHub

@@ -101,10 +101,10 @@ class RDPApplication(object):
         """
         ...
 
-    def setAutoReconnect(self, enable: bool):
+    def setAutoReconnect(self, enabled: bool):
         """
         Sets if auto reconnect should be enabled when connection is lost.
-        :param enable: (bool) If set to true AutoReconnect is enabled.
+        :param enabled: (bool) If set to true AutoReconnect is enabled.
         :return:
         """
         ...
@@ -333,6 +333,12 @@ class RDPApplication(object):
         """
         ...
 
+    def isPaused(self) -> bool:
+        """
+        :return: bool
+        """
+        ...
+
     def getBitsPerPixel(self):
         """
         Returns the color depth set with `setBitsPerPixel`.
@@ -404,7 +410,8 @@ class RDPApplication(object):
         while connecting (see `getServerInfo`; None before the first connection).
         :return: (dict) Keys: server, port, username, domain, width, height, bitsPerPixel, graphics,
             graphicsPipeline, sound, microphone, compressedAudio, clipboard, fileClipboard, sharedDirectories, running,
-            ready, reconnecting, lastError, framesPublished, freerdpVersion, rdpVersion, securityProtocol, serverInfo.
+            ready, reconnecting, lastError, framesPublished, freerdpVersion, rdpVersion, securityProtocol, serverInfo,
+            azureAD, transport.
         """
         ...
 
@@ -412,10 +419,10 @@ class RDPApplication(object):
         """
         Returns what FreeRDP received from the server while connecting - no extra connection is made:
         the TLS certificate FreeRDP verified, decoded by FreeRDP's certificate API (subject, issuer,
-        validity, signature algorithm, key type, SHA-256/SHA-1 fingerprints, alternative names, PEM), the NTLM challenge of its NLA exchange (Windows
-        version, build and name, NetBIOS/DNS computer, domain and forest names, server clock), the
-        Save Session Info data (logged-on user, domain, session id), and the negotiated RDP version
-        and security protocol.
+        validity, signature algorithm, key type, SHA-256/SHA-1 fingerprints, alternative names, PEM),
+        the NTLM challenge of its NLA exchange (Windows version, build and name, NetBIOS/DNS computer,
+        domain and forest names, server clock), the Save Session Info data (logged-on user, domain, session id),
+        and the negotiated RDP version and security protocol.
         :return: (dict | None) Keys: certificate {subject, issuer, commonName, selfSigned, notBefore,
             notAfter, daysLeft, expired, validity, signature, publicKey, sha256, sha1, email, upn,
             subjectAltNames, pem}, computer {osVersion, osName, osMajor, osMinor, osBuild, netbiosComputerName,
@@ -446,16 +453,179 @@ class RDPApplication(object):
         """
         ...
 
-    def setSound(self, enable, microphone=False, compressed=True):
+    def setAzureAD(self, enabled, helper=u'auto', userAgent=u''):
+        """
+        Signs in with Azure AD (Entra ID) instead of a password (RDS AAD: Azure / Entra joined hosts,
+        Azure Virtual Desktop). The Microsoft login page opens in a FreeRDP AAD helper - a separate
+        program shipped with pyfreerdpnative - and the session gets its access token from there.
+        Set it before `start`.
+        :param enabled: (bool) True to sign in with Azure AD.
+        :param helper: (str | unicode) `auto` (the webview helper, else the Qt one), `webview` (the
+            operating system's browser engine: WebKitGTK, WKWebView, Edge WebView2), `qt` (Qt
+            WebEngine - from the system, PySide6-WebEngine or PyQt6-WebEngine), or the path to any
+            program speaking FreeRDP's AAD helper protocol.
+        :param userAgent: (str | unicode) User-Agent the login page sees (FreeRDP 3.33
+            /azure:user-agent); empty for the browser's own.
+        :return:
+        """
+        ...
+
+    def getAzureAD(self):
+        """
+        Returns the Azure AD sign-in configuration.
+        :return: (dict) Keys: enabled (bool), helper (str), userAgent (str).
+        """
+        ...
+
+    def setTransport(self, mode):
+        """
+        Chooses the transport (FreeRDP 3.33 client UDP multitransport, needs a FreeRDP built with
+        WITH_RDPEUDP): `default` (FreeRDP's choice), `udp` (accept the server's UDP offer),
+        `udp-preferred` (also carry the static channels over UDP) or `tcp-only` (decline UDP).
+        Set it before `start`.
+        :param mode: (str | unicode) One of default, udp, udp-preferred, tcp-only.
+        :return:
+        """
+        ...
+
+    def getTransport(self):
+        """
+        Returns the transport set with `setTransport`.
+        :return: (str | unicode) default, udp, udp-preferred or tcp-only.
+        """
+        ...
+
+    def setSound(self, enabled, microphone=False, compressed=True):
         """
         Enables the remote sound: audio played on the remote machine is played
         locally (on by default). FreeRDP picks the platform's audio backend
         (WinMM on Windows, Core Audio on macOS, ALSA - which also reaches
         PulseAudio/PipeWire - on Linux, OpenSL ES on Android). Set it before `start`.
-        :param enable: (bool) True to play the remote sound locally, False for silence.
+        :param enabled: (bool) True to play the remote sound locally, False for silence.
         :param microphone: (bool) True to also redirect the local microphone.
         :param compressed: (bool) True (default) to allow compressed audio formats (AAC, ...),
             False for uncompressed PCM only (more bandwidth, no audio decoder involved).
+        :return:
+        """
+        ...
+
+    def setAudioLatency(self, milliseconds):
+        """
+        Sets the audio playback buffer target, in milliseconds (default 50; 0 = the audio backend's own
+        default, 100 for PulseAudio/PipeWire). FreeRDP reports the real playback latency to the server in
+        every Wave Confirm and the server synchronises audio and video with it, so a short buffer keeps the
+        sound with the picture; raise it on a jittery network if the sound stutters. Set it before `start`.
+        :param milliseconds: (int) 0 to 2000.
+        :raises ValueError: Out of range.
+        :return:
+        """
+        ...
+
+    def getAudioLatency(self):
+        """
+        Returns the audio playback buffer target set with `setAudioLatency`.
+        :return: (int) Milliseconds; 0 = the backend's default.
+        """
+        ...
+
+    def setStartProgram(self, command, workingDir=u''):
+        """
+        Starts a program with the session, through the protocol (no keyboard, no clipboard): it is sent with
+        the logon information and the server runs it instead of the desktop - the "alternate shell"
+        (mstsc's "Start the following program on connection"). When it exits, the session ends. The server
+        must allow it (policy "Start a program on connection"; Windows client editions may ignore it).
+        Set it before `start`; an empty command turns it off.
+        :param command: (str | unicode) The command line, e.g. `notepad` or `cmd /k ipconfig`.
+        :param workingDir: (str | unicode) Its working folder (optional).
+        :return:
+        """
+        ...
+
+    def getStartProgram(self):
+        """
+        Returns the program set with `setStartProgram`.
+        :return: (tuple[str, str]) (command line, working folder); empty when none.
+        """
+        ...
+
+    def setRemoteApp(self, program, arguments=u'', workingDir=u''):
+        """
+        Connects as a RemoteApp session: the server runs the program and the session shows its windows,
+        not a desktop. Programs are started through the RemoteApp channel (MS-RDPERP Client Execute) - no
+        keyboard, no clipboard - and more can be started later with `runCommand`. The server must offer
+        RemoteApp and allow the program (published, or "Allow remote start of unlisted programs"). Set it
+        before `start`; an empty program turns it off.
+        :param program: (str | unicode) The program, e.g. `notepad` or a full path.
+        :param arguments: (str | unicode) Its command-line arguments (optional).
+        :param workingDir: (str | unicode) Its working folder (optional; %VARIABLES% are expanded).
+        :return:
+        """
+        ...
+
+    def getRemoteApp(self):
+        """
+        Returns the RemoteApp set with `setRemoteApp`.
+        :return: (tuple[str, str, str] | None) (program, arguments, working folder), or None.
+        """
+        ...
+
+    def isRemoteApp(self):
+        """
+        :return: (bool) True while connected as a RemoteApp session with its channel up (`runCommand` works).
+        """
+        ...
+
+    def waitForRemoteApp(self, timeout=15.0):
+        """
+        Waits for the server's answer on the program of a RemoteApp session (`setRemoteApp`): it is
+        started through the RemoteApp channel while the session comes up.
+        :param timeout: (float | int) Seconds to wait.
+        :raises RuntimeError: The server refused it - with its reason (not allowed, not found...).
+        :raises TimeoutError: No answer (not a RemoteApp session, or a server without RemoteApp).
+        :return:
+        """
+        ...
+
+    def runCommand(self, program, arguments=u'', workingDir=u'', timeout=15.0):
+        """
+        Starts another program in a RemoteApp session through the protocol (Client Execute on the RemoteApp
+        channel - no keyboard, no clipboard) and waits for the server's answer.
+        :param program: (str | unicode) The program, e.g. `cmd` or a full path.
+        :param arguments: (str | unicode) Its arguments (optional; %VARIABLES% are expanded).
+        :param workingDir: (str | unicode) Its working folder (optional).
+        :param timeout: (float | int) Seconds to wait for the server's answer.
+        :raises ValueError: No program given.
+        :raises RuntimeError: Not a RemoteApp session, or the server refused - with its reason (not
+            allowed, not found, session locked...).
+        :raises TimeoutError: The server did not answer.
+        :return:
+        """
+        ...
+
+    def uploadFiles(self, paths, toDesktop=True, timeout=600.0, progress=None):
+        """
+        Uploads files or folders into the remote session: they go on the remote clipboard and the session
+        pastes them - on the desktop (Win+D, a click on it, Ctrl+V), or with toDesktop=False wherever the
+        remote focus is (e.g. an open Explorer folder) - and the remote side downloads them through the
+        clipboard channel. Blocks until every byte has arrived: run it on a worker thread in a GUI.
+        :param paths: (str | unicode | list[str]) Files and/or folders.
+        :param toDesktop: (bool) True: paste on the remote desktop; False: paste where the focus is.
+        :param timeout: (float | int) Seconds the transfer may take once started.
+        :param progress: (callable | None) progress(received, total) with byte counts, repeatedly.
+        :raises FileNotFoundError: A path does not exist.
+        :raises PermissionError: The server forbids file copy through the clipboard (its policy).
+        :raises TimeoutError: Nothing was pasted, or the transfer did not finish in time.
+        :return: (int) The bytes delivered.
+        """
+        ...
+
+    def setFrameListener(self, listener):
+        """
+        Registers a function called whenever a new frame is published - the moment FreeRDP has
+        finished painting it - so a viewer can show it at once instead of polling. It is called
+        from the RDP thread as listener(), outside every lock: keep it short (e.g. emit a queued
+        Qt signal) and fetch the frame from your own thread. None unregisters.
+        :param listener: (callable | None) The function.
         :return:
         """
         ...
@@ -542,17 +712,18 @@ class RDPApplication(object):
         ...
 
     @property
-    def isPaused(self) -> bool:
-        """
-        :return: bool
-        """
-        ...
-
-    @property
     def isFileTransferFinished(self) -> bool:
         """
         Used to check if file transfer to remote machine has finished.
         :return: (bool) True if the transfer has finished. False otherwise.
+        """
+        ...
+
+    def getFileTransferProgress(self):
+        """
+        Returns how much of the files on the remote clipboard (`saveClipboard` in file mode) the remote
+        side has received - it downloads them when they are pasted there.
+        :return: (tuple[int, int]) (bytes received, bytes offered).
         """
         ...
 

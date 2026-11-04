@@ -214,7 +214,7 @@ jobs:
           try:  # Qt is the optional [qt] extra: without it, the widget package refuses cleanly.
               import PyFreeRdpApp.rdpwidget
               raise SystemExit('the widget imported without Qt installed?')
-          except ImportError:
+          except:
               pass
           images = os.path.join(os.path.dirname(PyFreeRdpApp.__file__), 'rdpwidget', 'images')
           missing = [s for s in (16, 24, 32, 48, 64, 128, 256, 512)

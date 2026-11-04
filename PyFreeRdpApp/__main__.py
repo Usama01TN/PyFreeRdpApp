@@ -7,11 +7,11 @@ when a Qt binding is available, otherwise on the terminal (the password
 without echo). With Qt the session opens in a window; with --screenshot (or
 without Qt) one frame is saved and the program exits.
 """
+from os.path import dirname, abspath, exists, basename
 from sys import exit, platform, argv
 from argparse import ArgumentParser
-from os.path import dirname
+from time import sleep, time
 from getpass import getpass
-from time import sleep
 from json import dumps
 from sys import path
 from os import walk
@@ -20,9 +20,9 @@ if dirname(__file__) not in path:
     path.append(dirname(__file__))
 
 try:
-    from ._pyfreerdp import DISPLAY_FORMATS, RDPApplication, initializeLogging
+    from ._pyfreerdp import DEFAULT_AUDIO_LATENCY, DISPLAY_FORMATS, TRANSPORTS, RDPApplication, initializeLogging
 except:
-    from _pyfreerdp import DISPLAY_FORMATS, RDPApplication, initializeLogging
+    from _pyfreerdp import DEFAULT_AUDIO_LATENCY, DISPLAY_FORMATS, TRANSPORTS, RDPApplication, initializeLogging
 
 
 def parseArgs(arv):
@@ -46,11 +46,40 @@ def parseArgs(arv):
     p.add_argument(u'--microphone', action=u'store_true', help=u'Redirect the local microphone.')
     p.add_argument(u'--pcm-audio', action=u'store_true',
                    help=u'Uncompressed PCM audio only (more bandwidth, no audio decoder).')
+    p.add_argument(u'--azure-ad', action=u'store_true',
+                   help=u'Sign in with Azure AD (Entra ID): the Microsoft login page opens, no password needed.')
+    p.add_argument(u'--aad-helper', default=u'auto', metavar=u'auto|webview|qt|PATH',
+                   help=u'With --azure-ad: the login helper - webview (the system browser engine), qt (Qt '
+                        u'WebEngine) or a program speaking FreeRDP\'s AAD helper protocol (default auto).')
+    p.add_argument(u'--aad-user-agent', default=u'', metavar=u'TEXT',
+                   help=u'With --azure-ad: the User-Agent the login page sees (default: the browser\'s own).')
+    p.add_argument(u'--transport', default=u'default', choices=TRANSPORTS,
+                   help=u'UDP multi transport: udp, udp-preferred or tcp-only (default: FreeRDP\'s choice).')
     p.add_argument(u'--screenshot', metavar=u'FILE',
                    help=u'Console only: save the remote screen to FILE and exit (combines with --info).')
     p.add_argument(u'--info', action=u'store_true',
                    help=u'Console only: print the connection status and session information, then exit.')
     p.add_argument(u'--json', action=u'store_true', help=u'With --info: print the report as JSON.')
+    p.add_argument(u'--upload', metavar=u'PATH',
+                   help=u'Console only: put a file or folder on the remote desktop and exit (pasted there '
+                        u'through the clipboard; done when the remote side has received every byte).')
+    p.add_argument(u'--upload-wait', type=float, default=8.0, metavar=u'SECONDS',
+                   help=u'With --upload or --run: time for the remote desktop to appear first (default 8; '
+                        u'more for a first logon).')
+    p.add_argument(u'--upload-timeout', type=float, default=600.0, metavar=u'SECONDS',
+                   help=u'With --upload: give up after this long (default 600).')
+    p.add_argument(u'--app', metavar=u'PROGRAM',
+                   help=u'Connect as a RemoteApp session running PROGRAM: the server starts it through the RemoteApp '
+                        u'channel (no keyboard, no clipboard) and the session shows only its windows. The server '
+                        u'must allow it (a published RemoteApp, or "Allow remote start of unlisted programs").')
+    p.add_argument(u'--app-args', default=u'', metavar=u'ARGS', help=u'With --app: the program\'s arguments.')
+    p.add_argument(u'--shell', metavar=u'COMMAND',
+                   help=u'Start COMMAND instead of the desktop (alternate shell, sent with the logon; the session '
+                        u'ends when it exits). The server must allow it (policy "Start a program on connection").')
+    p.add_argument(u'--workdir', default=u'', metavar=u'DIR', help=u'With --app or --shell: the working folder.')
+    p.add_argument(u'--audio-latency', type=int, default=DEFAULT_AUDIO_LATENCY, metavar=u'MS',
+                   help=u'Audio playback buffer (default %(default)s; 0 = the audio backend\'s default). Short '
+                        u'keeps the sound in sync with the picture; raise it if the sound stutters.')
     p.add_argument(u'--format', default=u'pillow', choices=DISPLAY_FORMATS,
                    help=u'Display type used for --screenshot (default pillow).')
     p.add_argument(u'--no-gui', action=u'store_true', help=u'Never open a window or a dialog.')
@@ -90,6 +119,8 @@ def needsInput(args):
     :param args: any
     :return: bool
     """
+    if getattr(args, u'azure_ad', False):  # The Microsoft login page asks for the credentials.
+        return not args.host
     return not args.host or args.user is None or args.password is None
 
 
@@ -113,9 +144,9 @@ def askTerminal(args):
 
     while not args.host:
         args.host = ask(u'Server')
-    if args.user is None:
+    if args.user is None and not args.azure_ad:
         args.user = ask(u'User') or u''
-    if args.password is None:
+    if args.password is None and not args.azure_ad:
         args.password = getpass(u'Password: ')
     if args.port is None:
         port = ask(u'Port', u'3389')
@@ -157,9 +188,23 @@ def askDialog(args):
     sound.setChecked(not args.no_sound)
     microphone = QCheckBox(dialog.tr(u'Redirect my microphone'))  # type: QCheckBox
     microphone.setChecked(args.microphone)
+    program = QLineEdit(args.app or args.shell or u'')  # type: QLineEdit
+    program.setPlaceholderText(dialog.tr(u'Optional: a program to start, e.g. notepad'))
+    programArgs = QLineEdit(args.app_args or u'')  # type: QLineEdit
+    programArgs.setPlaceholderText(dialog.tr(u'its arguments (optional)'))
+    programMode = QComboBox()  # type: QComboBox
+    programMode.addItems([dialog.tr(u'as a RemoteApp (only its windows)'),
+                          dialog.tr(u'instead of the desktop (alternate shell)')])
+    programMode.setCurrentIndex(1 if args.shell and not args.app else 0)
+    azureAD = QCheckBox(dialog.tr(u'Sign in with Azure AD (Entra ID)'))  # type: QCheckBox
+    azureAD.setToolTip(dialog.tr(u'The Microsoft login page opens; no password is needed here.'))
+    azureAD.setChecked(bool(getattr(args, u'azure_ad', False)))
+    azureAD.toggled.connect(lambda checked: password.setEnabled(not checked))
+    password.setEnabled(not azureAD.isChecked())
     for label, field in ((u'Server', host), (u'User', user), (u'Password', password), (u'Domain', domain),
-                         (u'Port', port), (u'Desktop size', size), (u'Colour depth', bpp),
-                         (u'Graphics', graphics), (u'Sound', sound), (u'', microphone)):
+                         (u'Port', port), (u'Desktop size', size), (u'Colour depth', bpp), (u'Graphics', graphics),
+                         (u'Sound', sound), (u'', microphone), (u'', azureAD), (u'Program', program),
+                         (u'Arguments', programArgs), (u'Start it', programMode)):
         form.addRow(label, field)
     # Shared folders: redirected as drives ("<name> on <this pc>" remotely).
     shares = QListWidget()  # type: QListWidget
@@ -215,6 +260,13 @@ def askDialog(args):
     args.gfx = graphics.currentText()
     args.no_sound = not sound.isChecked()
     args.microphone = microphone.isChecked()
+    args.azure_ad = azureAD.isChecked()
+    args.app = args.shell = None
+    if program.text().strip():  # started through the protocol - RemoteApp channel or logon - no keyboard
+        if programMode.currentIndex() == 0:
+            args.app, args.app_args = program.text().strip(), programArgs.text().strip()
+        else:
+            args.shell = u' '.join(filter(None, (program.text().strip(), programArgs.text().strip())))
     args.share = [shares.item(i).text() for i in range(shares.count())]
     return args
 
@@ -234,11 +286,18 @@ def buildApp(args):
     try:
         width, height = parseSize(args.size)  # type: int, int
     except ValueError:
-        exit(u'--size must look like 1280x800')
+        exit(u'--Size must look like 1280x800')
     app.setDisplaySize(width, height)
     app.setBitsPerPixel(args.bpp)
     app.setGraphics(args.gfx or u'auto')
     app.setSound(not args.no_sound, microphone=args.microphone, compressed=not args.pcm_audio)
+    app.setAudioLatency(args.audio_latency)
+    if args.app:
+        app.setRemoteApp(args.app, args.app_args, args.workdir)
+    elif args.shell:
+        app.setStartProgram(args.shell, args.workdir)
+    app.setAzureAD(args.azure_ad, helper=args.aad_helper, userAgent=args.aad_user_agent)
+    app.setTransport(args.transport)
     for spec in args.share:
         pth, _, name = spec.partition(u'=')  # type: str, str, str
         app.loadSharedDirectory(pth, name)
@@ -257,7 +316,7 @@ def saveScreenshot(app, pth, fmt):
     width, height = app.getDisplaySize()  # type: int, int
     if fmt == u'pillow':
         frame.save(pth)
-        width, height = frame.size
+        width, height = frame.size  # type: int, int
     elif fmt == u'qimage':
         frame.save(pth)
         width, height = frame.width(), frame.height()  # type: int, int
@@ -273,7 +332,7 @@ def saveScreenshot(app, pth, fmt):
         data = frame if fmt == u'bytes' else frame[3]
         with open(pth, u'wb') as fh:
             fh.write(data)
-    print(u'screenshot: {} ({}x{}, {})'.format(pth, width, height, fmt))
+    print(u'Screenshot: {} ({}x{}, {})'.format(pth, width, height, fmt))
     return {u'path': pth, u'width': width, u'height': height, u'format': fmt}
 
 
@@ -281,32 +340,111 @@ def isConsoleMode(args):
     """
     --screenshot and/or --info run in the console only: no Qt application, window or dialog.
     So does --no-gui, and any run without a Qt binding.
-    :param args: argparse.Namespace
+    :param args: Namespace
     :return: bool
     """
-    return bool(args.screenshot or args.info or args.no_gui or not haveQt())
+    return bool(args.screenshot or args.info or args.upload or args.no_gui or not haveQt())
 
 
 def runConsole(app, args):
     """
     The console-only run: take the screenshot and/or print the report.
     :param app: (RDPApplication) A connected session.
-    :param args: argparse.Namespace
+    :param args: Namespace
     :return: (int) The exit code.
     """
     sleep(2)  # Let the desktop paint and the channels (clipboard, graphics, sound) come up.
+    if args.upload or args.app:
+        code = reportRemoteApp(app, args) if args.app else 0  # type: int
+        if not code and args.upload:
+            code = uploadToDesktop(app, args)  # type: int
+        if code or not (args.screenshot or args.info):
+            return code
     shot = None
-    if args.screenshot or not args.info:
+    if args.screenshot or not (args.info or args.upload or args.app):
         try:
             shot = saveScreenshot(app, args.screenshot or u'screenshot.png', args.format)
         except Exception as exc:
-            print(u'screenshot failed: {}'.format(exc))
+            print(u'Screenshot failed: {}'.format(exc))
             return 3
     if args.info:
         info = app.getSessionInfo()
         if shot is not None:
             info[u'screenshot'] = shot
         print(dumps(info, indent=2, default=str) if args.json else formatSessionInfo(info))
+    return 0
+
+
+def waitUntil(condition, seconds, step=0.2):
+    """
+    :param condition: (callable) Polled until it returns True.
+    :param seconds: (float | int) Longest wait.
+    :param step: (float | int) Poll interval.
+    :return: (bool) Whether the condition came true in time.
+    """
+    deadline = time() + seconds  # type: float
+    while time() < deadline:
+        if condition():
+            return True
+        sleep(step)
+    return bool(condition())
+
+
+def uploadToDesktop(app, args):
+    """
+    --upload: put a file or folder on the remote desktop from the console (RDPApplication.uploadFiles:
+    it goes on the remote clipboard, the session pastes it on the desktop, the remote side downloads it
+    through the clipboard channel - done when every byte has arrived).
+    :param app: (RDPApplication) A connected session.
+    :param args: Namespace
+    :return: (int) The exit code: 0 uploaded, 2 no such path, 4 refused by the server, 5 not pasted, 6 incomplete.
+    """
+    source = abspath(args.upload)  # type: str
+    if not exists(source):
+        print(u'Upload failed: {} does not exist'.format(source))
+        return 2
+    print(u'Uploading {}: waiting {:g} s for the remote desktop'.format(basename(source), args.upload_wait))
+    sleep(args.upload_wait)
+    state = {u'received': 0, u'shown': -1}
+
+    def progress(received, totalBytes):
+        """
+        :param received: (int) Bytes the remote side has.
+        :param totalBytes: (int) Bytes offered.
+        :return:
+        """
+        state[u'received'] = received
+        percent = int(100 * received / totalBytes) if totalBytes else 100  # type: int
+        if percent != state[u'shown']:
+            print(u'  {:3d}%  {:,} / {:,} bytes'.format(percent, received, totalBytes))
+            state[u'shown'] = percent
+
+    try:
+        total = app.uploadFiles(source, timeout=args.upload_timeout, progress=progress)
+    except PermissionError as exc:
+        print(u'Upload failed: {} (e.g. --share "{}")'.format(exc, dirname(source)))
+        return 4
+    except TimeoutError as exc:
+        print(u'Upload failed: {}{}'.format(exc, u' Try --upload-wait 30.' if not state[u'received'] else u''))
+        return 6 if state[u'received'] else 5
+    print(u'Uploaded {} to the remote desktop ({:,} bytes)'.format(basename(source), total))
+    return 0
+
+
+def reportRemoteApp(app, args):
+    """
+    --app: the server starts the program through the RemoteApp channel as the session comes up; report its
+    answer.
+    :param app: (RDPApplication) A connected RemoteApp session.
+    :param args: Namespace
+    :return: (int) The exit code: 0 started, 7 refused or no answer.
+    """
+    try:
+        app.waitForRemoteApp()
+    except (RuntimeError, TimeoutError) as exc:
+        print(u'RemoteApp failed: {}'.format(exc))
+        return 7
+    print(u'Started as a RemoteApp: {} {}'.format(args.app, args.app_args).rstrip())
     return 0
 
 
@@ -377,6 +515,10 @@ def formatSessionInfo(info):
         (u'Graphics', u'{} ({})'.format(info.get(u'graphics'), words[u'graphics'])),
         (u'Sound', words[u'sound']),
         (u'Clipboard', words[u'clipboard']),
+        (u'Sign-in', u'Azure AD ({})'.format(((info.get(u'azureAD') or {}).get(u'helperPath') or u'?').replace(
+            u'\\', u'/').rsplit(u'/', 1)[-1])
+        if (info.get(u'azureAD') or {}).get(u'enabled') else None),
+        (u'Transport', info.get(u'transport') if info.get(u'transport') not in (None, u'default') else None),
         (u'Shared folders', folders or u'none'),
         (u'Frames received', u'{}'.format(info.get(u'framesPublished'))),
         (u'FreeRDP', u'{}'.format(info.get(u'freerdpVersion'))),
@@ -437,11 +579,11 @@ def MainWindow(app, args):
     """
     The session window (built lazily so the module imports without Qt).
     :param app: RDPApplication
-    :param args: argparse.Namespace
+    :param args: Namespace
     :return: QMainWindow
     """
-    from ManyQt.QtWidgets import QLabel, QMainWindow, QToolBar, QMessageBox, QDialog, QPlainTextEdit, \
-        QVBoxLayout, QDialogButtonBox
+    from ManyQt.QtWidgets import QLabel, QMainWindow, QToolBar, QMessageBox, QDialog, QPlainTextEdit, QVBoxLayout, \
+        QDialogButtonBox
     from ManyQt.QtCore import QTimer, pyqtSlot
     from ManyQt.QtGui import QFont
     try:
@@ -511,7 +653,10 @@ def MainWindow(app, args):
                                       filesDownloaded=self.onFilesDownloaded,
                                       screenshotSaved=self.onScreenshotSaved,
                                       clipboardSent=self.onClipboardSent,
-                                      connectionLost=self.onConnectionLost)  # type: RDPWidget
+                                      connectionLost=self.onConnectionLost,
+                                      commandFinished=self.onCommandFinished,
+                                      uploadProgress=self.onUploadProgress,
+                                      uploadFinished=self.onUploadFinished)  # type: RDPWidget
             self.__m_asking = False  # type: bool
             self.__m_view.sessionRestarted.connect(self.onSessionRestarted)
             self.setCentralWidget(self.__m_view)
@@ -528,6 +673,14 @@ def MainWindow(app, args):
             self.__m_send = bar.addAction(self.tr(u'Send clipboard'))
             self.__m_send.setToolTip(self.tr(u'Offer the local clipboard (text or copied files) to the remote machine'))
             self.__m_send.triggered.connect(self.__m_view.resendClipboard)
+            self.__m_upload = bar.addAction(self.tr(u'Upload files...'))
+            self.__m_upload.setToolTip(self.tr(u'Upload files to the remote desktop (pasted there; progress '
+                                               u'in the status bar)'))
+            self.__m_upload.triggered.connect(self.__m_view.chooseAndUploadFiles)
+            bar.addSeparator()
+            self.__m_run = bar.addAction(self.tr(u'Run program...'))
+            self.__m_run.setToolTip(self.tr(u'Run a program, document or URL in the remote session'))
+            self.__m_run.triggered.connect(self.__m_view.chooseAndRunCommand)
             bar.addSeparator()
             self.__m_shot = bar.addAction(self.tr(u'Screenshot...'))
             self.__m_shot.setToolTip(self.tr(u'Save the remote screen as an image'))
@@ -553,7 +706,7 @@ def MainWindow(app, args):
         @pyqtSlot()
         def refreshStatus(self):
             """
-            :return:
+            :return: None
             """
             info = self.__m_view.getSessionInfo()  # type: dict
             if not info[u'ready']:
@@ -582,6 +735,7 @@ def MainWindow(app, args):
             self.__m_info.raise_()
 
         @pyqtSlot(u'QString')
+        @pyqtSlot(str)
         def onFilesDownloaded(self, folder):
             """
             :param folder: str | unicode
@@ -601,6 +755,45 @@ def MainWindow(app, args):
             """
             self.statusBar().showMessage(self.tr(u'Clipboard: {}').format(message), 15000)
             QMessageBox.warning(self, self.tr(u'Clipboard'), message)
+
+        @pyqtSlot(bool, u'QString')
+        @pyqtSlot(bool, str)
+        def onCommandFinished(self, ok, message):
+            """
+            :param ok: (bool) Whether the command was sent to the session.
+            :param message: (str | unicode) The command, or why it failed.
+            :return:
+            """
+            if ok:
+                self.statusBar().showMessage(self.tr(u'Started in the remote session: {}').format(message), 10000)
+            else:
+                self.statusBar().showMessage(self.tr(u'Run failed: {}').format(message), 15000)
+                QMessageBox.warning(self, self.tr(u'Run program'), message)
+
+        @pyqtSlot(object, object)
+        def onUploadProgress(self, received, total):
+            """
+            :param received: (int) Bytes the remote side has.
+            :param total: (int) Bytes offered.
+            :return:
+            """
+            percent = int(100 * received / total) if total else 100  # type: int
+            self.statusBar().showMessage(self.tr(u'Uploading: {}%  ({:,} of {:,} bytes)').format(
+                percent, received, total))
+
+        @pyqtSlot(bool, u'QString')
+        @pyqtSlot(bool, str)
+        def onUploadFinished(self, ok, message):
+            """
+            :param ok: (bool) Whether every byte arrived.
+            :param message: (str | unicode) What was uploaded, or why it failed.
+            :return:
+            """
+            if ok:
+                self.statusBar().showMessage(message, 15000)
+            else:
+                self.statusBar().showMessage(self.tr(u'Upload failed: {}').format(message), 15000)
+                QMessageBox.warning(self, self.tr(u'Upload files'), message)
 
         @pyqtSlot(u'QString')
         @pyqtSlot(str)
@@ -673,7 +866,7 @@ def main(arv=None):
         if platform == u'win32':  # The taskbar shows our icon, not Python's.
             try:
                 from ctypes import windll
-                if hasattr(windll.shell32, 'SetCurrentProcessExplicitAppUserModelID'):
+                if hasattr(windll.shell32, u'SetCurrentProcessExplicitAppUserModelID'):
                     windll.shell32.SetCurrentProcessExplicitAppUserModelID(u'PyFreeRdpApp')
             except:
                 pass
@@ -687,7 +880,7 @@ def main(arv=None):
             rdpApp.start()
             break
         except ConnectionError as exc:
-            print(u'could not connect: {}'.format(exc))
+            print(u'Could not connect: {}'.format(exc))
             if not console:
                 try:
                     from .rdpwidget import DisconnectDialog

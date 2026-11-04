@@ -312,11 +312,11 @@ def describeCertificate(api, pem):
 
 def humanDuration(seconds):
     """
-    :param seconds: (float) A duration.
+    :param seconds: (float | int) A duration.
     :return: (str | unicode) e.g. `3 days`, `1 day`, `5 hours`, `12 minutes`.
     """
     for unit, size in ((u'day', 86400), (u'hour', 3600), (u'minute', 60)):
         if seconds >= size:
             count = int(seconds // size)  # type: int
             return u'{} {}{}'.format(count, unit, u's' if count != 1 else u'')
-    return u'less than a minute'
+    return u'Less than a minute'

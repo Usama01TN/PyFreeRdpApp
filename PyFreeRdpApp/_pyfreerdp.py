@@ -8,11 +8,18 @@ from pyfreerdpnative.freerdp.settings_keys import FreeRDP_AudioCapture, FreeRDP_
     FreeRDP_GfxH264, FreeRDP_GfxProgressive, FreeRDP_GfxProgressiveV2, FreeRDP_IgnoreCertificate, FreeRDP_NlaSecurity, \
     FreeRDP_Password, FreeRDP_RedirectClipboard, FreeRDP_RemoteFxCodec, FreeRDP_ServerHostname, FreeRDP_ServerPort, \
     FreeRDP_SoftwareGdi, FreeRDP_SupportGraphicsPipeline, FreeRDP_TcpAckTimeout, FreeRDP_TcpConnectTimeout, \
-    FreeRDP_TlsSecurity
+    FreeRDP_TlsSecurity, FreeRDP_RemoteApplicationMode, FreeRDP_RemoteApplicationProgram, FreeRDP_AadSecurity, \
+    FreeRDP_ShellWorkingDirectory, FreeRDP_RemoteApplicationCmdLine, FreeRDP_AlternateShell, FreeRDP_AadAuthHelper, \
+    FreeRDP_RemoteApplicationName, FreeRDP_MultitransportFlags
+from pyfreerdpnative.freerdp.rail import RAIL_EXEC_ORDER, TS_RAIL_EXEC_FLAG_EXPAND_WORKINGDIRECTORY, \
+    TS_RAIL_EXEC_FLAG_EXPAND_ARGUMENTS, RAIL_EXEC_E_HOOK_NOT_LOADED, RAIL_EXEC_E_DECODE_FAILED, \
+    RAIL_EXEC_E_NOT_IN_ALLOWLIST, RAIL_EXEC_E_FILE_NOT_FOUND, RAIL_EXEC_E_FAIL, RAIL_EXEC_E_SESSION_LOCKED, \
+    RAIL_EXEC_S_OK, RAIL_SVC_CHANNEL_NAME
+from pyfreerdpnative.freerdp.settings_types import CLIPRDR_FLAG_LOCAL_TO_REMOTE, CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES, \
+    CLIPRDR_FLAG_REMOTE_TO_LOCAL, CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES, TRANSPORT_TYPE_UDP_FECR, SOFTSYNC_TCP_TO_UDP, \
+    TRANSPORT_TYPE_UDP_PREFERRED
 from pyfreerdpnative.freerdp.input import KBD_FLAGS_EXTENDED, KBD_FLAGS_RELEASE, PTR_FLAGS_BUTTON1, PTR_FLAGS_BUTTON2, \
     PTR_FLAGS_BUTTON3, PTR_FLAGS_DOWN, PTR_FLAGS_MOVE, PTR_FLAGS_WHEEL, PTR_FLAGS_WHEEL_NEGATIVE
-from pyfreerdpnative.freerdp.settings_types import CLIPRDR_FLAG_LOCAL_TO_REMOTE, CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES, \
-    CLIPRDR_FLAG_REMOTE_TO_LOCAL, CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES
 from pyfreerdpnative.freerdp.settings_keys import FreeRDP_RdpVersion, FreeRDP_SelectedProtocol, \
     FreeRDP_ExternalCertificateManagement
 from pyfreerdpnative.freerdp.session import INFO_TYPE_LOGON, INFO_TYPE_LOGON_LONG, INFO_TYPE_LOGON_EXTENDED_INF, \
@@ -22,10 +29,11 @@ from pyfreerdpnative.freerdp.scancode import RDP_SCANCODE_BACKSPACE, RDP_SCANCOD
 from pyfreerdpnative.freerdp.client import RDP_CLIENT_ENTRY_POINTS_V1, RDP_CLIENT_INTERFACE_VERSION, rdpClientContext
 from pyfreerdpnative.freerdp.codec.color import PIXEL_FORMAT_BGR16, PIXEL_FORMAT_BGR24, PIXEL_FORMAT_BGRA32
 from pyfreerdpnative.freerdp.event import pChannelConnectedEventHandler, pChannelDisconnectedEventHandler
-from pyfreerdpnative.freerdp.error import FREERDP_ERROR_CONNECT_LOGON_FAILURE
 from pyfreerdpnative.freerdp.channels.cliprdr import CLIPRDR_SVC_CHANNEL_NAME
+from pyfreerdpnative.freerdp.error import FREERDP_ERROR_CONNECT_LOGON_FAILURE
 from pyfreerdpnative.freerdp.channels.rdpgfx import RDPGFX_DVC_CHANNEL_NAME
 from pyfreerdpnative.freerdp.client.rdpgfx import RdpgfxClientContext
+from pyfreerdpnative.freerdp.client.rail import RailClientContext
 from pyfreerdpnative.freerdp.transport_io import rdpTransportIo
 from pyfreerdpnative.freerdp.graphics import rdpPointer
 from pyfreerdpnative.winpr.synch import WAIT_FAILED
@@ -34,21 +42,38 @@ from pyfreerdpnative.winpr.wtypes import HANDLE
 from pyfreerdpnative import load
 from ctypes import c_char_p, c_char, memmove, c_ubyte, cast, c_void_p, c_uint32, c_int, sizeof, byref, addressof, \
     POINTER, string_at
-from datetime import datetime, timezone
-
-try:
-    from ctypes import WinDLL  # Windows only: kernel32 for the event API.
-except:
-    WinDLL = None  # Linux / macOS: WinPR exports what is needed.
 from os.path import join, expanduser, abspath, isfile, dirname, isdir, basename, normpath, exists
 from logging import getLogger, FileHandler, basicConfig, StreamHandler, INFO
-from threading import Event, Lock, RLock, Thread, current_thread
+from threading import Condition, Event, Lock, RLock, Thread, current_thread
 from os import environ, remove, getcwd, getpid, makedirs
+from datetime import datetime, timezone
 from sys import platform, stderr, path
 from subprocess import Popen, PIPE
 from traceback import format_exc
 from time import sleep, time
 from re import search
+
+try:
+    from pyfreerdpnative.freerdp.settings_keys import FreeRDP_SupportMultitransportUdp
+except:
+    FreeRDP_SupportMultitransportUdp = None
+try:
+    from pyfreerdpnative.freerdp.settings_keys import FreeRDP_AadAuthUserAgent
+except:  # Bindings older than FreeRDP 3.33: no Azure AD User-Agent (Azure AD sign-in needs 3.33).
+    FreeRDP_AadAuthUserAgent = None
+try:
+    from pyfreerdpnative.freerdp.error import FREERDP_ERROR_CONNECT_NTLM_BLOCKED
+except:
+    # FreeRDP 3.33.0 additions, looked up so the bindings of 3.32 still work.
+    FREERDP_ERROR_CONNECT_NTLM_BLOCKED = 0x0002001F  # type: int
+if platform.lower() == u'win32':
+    from ctypes import WinDLL  # Windows only: kernel32 for the event API.
+else:
+    WinDLL = None  # Linux / macOS: WinPR exports what is needed.
+try:
+    from time import monotonic
+except:  # pragma: no cover - Python 2
+    monotonic = time
 
 if dirname(__file__) not in path:
     path.append(dirname(__file__))
@@ -61,10 +86,17 @@ try:
     from ._cliprdr import Clipboard
 except:
     from _cliprdr import Clipboard
-
+try:
+    from .keyboard import KEY_D, KEY_V, LEFT_CONTROL, LEFT_WINDOW
+except:
+    from keyboard import KEY_D, KEY_V, LEFT_CONTROL, LEFT_WINDOW
+try:
+    from subprocess import CREATE_NO_WINDOW
+except:
+    CREATE_NO_WINDOW = 0  # type: int
 try:
     from faulthandler import enable, is_enabled
-except ImportError:
+except:
     _fhEnabled = False  # type: bool
 
 
@@ -88,12 +120,26 @@ except ImportError:
         """
         return _fhEnabled
 
-try:
-    from subprocess import CREATE_NO_WINDOW
-except:
-    CREATE_NO_WINDOW = 0  # type: int
-
 _log = getLogger(u'PyFreeRdpApp')
+TRANSPORTS = (u'default', u'udp', u'udp-preferred', u'tcp-only')  # type: tuple
+# stop() keeps the connection this long after the last key/mouse event, so the server reads it before
+# the close (a close with server updates unread is a TCP reset, which drops what the server had not read).
+INPUT_LINGER = 0.5  # type: float
+# Audio buffer target (ms) for FreeRDP's rdpsnd backends. FreeRDP reports the real playback latency to
+# the server in each Wave Confirm, which the server uses for A/V sync; a short buffer keeps sound close
+# to the picture. PulseAudio's own default is 100 ms. 0 = the backend's default.
+DEFAULT_AUDIO_LATENCY = 50  # type: int
+# RemoteApp (MS-RDPERP) Client Execute: the server expands %VARIABLES% in the arguments and folder.
+RAIL_EXEC_FLAGS = TS_RAIL_EXEC_FLAG_EXPAND_WORKINGDIRECTORY | TS_RAIL_EXEC_FLAG_EXPAND_ARGUMENTS  # type: int
+# Why the server refused a Client Execute (RAIL_EXEC_RESULT_ORDER.execResult).
+RAIL_EXEC_ERRORS = {
+    RAIL_EXEC_E_HOOK_NOT_LOADED: u'The server\'s RemoteApp component is not running',
+    RAIL_EXEC_E_DECODE_FAILED: u'The server could not read the request',
+    RAIL_EXEC_E_NOT_IN_ALLOWLIST: u'The server does not allow this program - publish it as a RemoteApp, or allow '
+                                  u'unlisted programs (policy "Allow remote start of unlisted programs")',
+    RAIL_EXEC_E_FILE_NOT_FOUND: u'the server did not find the program',
+    RAIL_EXEC_E_FAIL: u'The server could not start it', RAIL_EXEC_E_SESSION_LOCKED: u'The session is locked',
+}  # type: dict[int, str]
 # (RDPController::start): 32 -> BGRA32, 24 -> BGR24, 16 -> BGR16
 _PIXEL_FORMATS = {32: PIXEL_FORMAT_BGRA32, 24: PIXEL_FORMAT_BGR24, 16: PIXEL_FORMAT_BGR16}  # type: dict[int, int]
 # (RDPController::pressKey(wchar_t)): these characters are typed as real keys,
@@ -135,9 +181,6 @@ def _guard(default=None):
 def initializeLogging(logFolder, logLevel=u'INFO'):
     """
     Initializes logging into this folder.
-    :param logFolder: str | unicode
-    :param logLevel: str | unicode
-    :return:
     """
     import logging
     level = getattr(logging, str(logLevel).upper(), INFO)
@@ -148,7 +191,7 @@ def initializeLogging(logFolder, logLevel=u'INFO'):
                 makedirs(logFolder)
             handlers.append(FileHandler(join(logFolder, u'pyfreerdpapp.log')))
         except OSError as exc:
-            _log.warning(u'could not open log folder %s: %s', logFolder, exc)
+            _log.warning(u'Could not open log folder %s: %s', logFolder, exc)
     basicConfig(level=level, handlers=handlers, format=u'%(asctime)s %(levelname)s %(name)s: %(message)s')
     _log.setLevel(level)
     _enableCrashLog(logFolder)
@@ -236,7 +279,7 @@ def lastNativeCrash():
             """
             :return:
             """
-            result['output'] = proc.communicate()  # type: tuple[str, str]
+            result[u'output'] = proc.communicate()  # type: tuple[str, str]
 
         thread = Thread(target=communicate)  # type: Thread
         thread.daemon = True
@@ -245,7 +288,7 @@ def lastNativeCrash():
         if thread.is_alive():
             proc.kill()
             thread.join()
-        stdout, _ = result.get('output', ('', ''))  # type: bytes, int
+        stdout, _ = result.get(u'output', (u'', u''))  # type: bytes, int
         if not isinstance(stdout, type(u'')):
             stdout = stdout.decode(u'utf-8', u'replace')  # type: str
         out = stdout  # type: str
@@ -443,6 +486,14 @@ class RDPApplication(object):
         self._thread = None
         self._refs = []  # C callbacks must outlive the session.
         self._queue = []  # _Call objects for the RDP thread.
+        self._lastInputAt = 0.0  # type: float # monotonic time the last key/mouse event went out (stop() lingers)
+        self._frameListener = None  # called on the RDP thread when a new frame is published
+        self._startProgram = (u'', u'')  # (command line, working folder): the session's alternate shell
+        self._remoteApp = None  # (program, arguments, working folder): a RemoteApp session
+        self._rail = None  # POINTER(RailClientContext) while the RemoteApp channel is up
+        self._railRefs = []  # the ctypes callbacks given to it
+        self._execResults = []  # (execResult, rawResult) per Client Execute, in order
+        self._execCondition = Condition()  # type: Condition
         self._queueLock = Lock()  # type: Lock
         self._host = u''  # type: str
         self._port = 3389  # type: int
@@ -478,17 +529,24 @@ class RDPApplication(object):
         self._wake = None
         self._microphone = False  # type: bool
         self._rdpVersion = None  # Negotiated RDP version, e.g. u'10.12'.
-        self._securityProtocol = None  # negotiated security, e.g. 'NLA (CredSSP)'.
+        self._securityProtocol = None  # Negotiated security, e.g. 'NLA (CredSSP)'.
         # What FreeRDP received from the server while connecting (getServerInfo).
         self._certificatePem = None  # the TLS certificate, from VerifyX509Certificate.
-        self._certificateInfo = None  # ... decoded once per connection.
+        self._certificateInfo = None  # ... Decoded once per connection.
         self._sentIdentity = (u'', u'')  # type: tuple[str, str] # (user, domain) as last sent to FreeRDP.
         self._challenge = None  # the NTLM CHALLENGE of the NLA exchange, decoded.
         self._logon = {}  # Save Session Info: user, domain, session id.
         self._ioSaved = None  # FreeRDP's own transport I/O table while ours is installed.
         self._disconnectReason = None  # Why the last session ended (getDisconnectReason).
         self._disconnectListener = None
+        self._aad = False  # Azure AD (Entra ID) sign-in through a FreeRDP AAD helper.
+        self._aadHelper = u'auto'  # type: str
+        self._aadUserAgent = u''  # type: str
+        self._aadResolved = None  # (helper path, environment) for the running session.
+        self._aadSavedEnv = None  # What the helper's environment replaced, restored by stop()
+        self._transport = u'default'  # type: str
         self._compressedAudio = True  # type: bool # False: PCM only (no audio decoder).
+        self._audioLatency = DEFAULT_AUDIO_LATENCY  # type: int
         self._pointers = {}  # address of an rdpPointer -> decoded image.
         self._clipboard = Clipboard(self._post)  # type: Clipboard
         self.previousCrash = None
@@ -506,6 +564,7 @@ class RDPApplication(object):
                        crash.get(u'module'), crash.get(u'offset'), crash.get(u'exception'),
                        crash.get(u'module_path', u'?'))
         self.previousCrash = crash
+        self._resolveAzureAD()
         _markSession(True)
         if self._running:
             return
@@ -527,6 +586,21 @@ class RDPApplication(object):
         Stops the rdp connection to the server.
         :return:
         """
+        # Deliver what is still queued for the RDP thread (key presses, clicks) while the connection is
+        # up: the calls run in order, so once this no-op ran, everything sent before stop() went out.
+        # Otherwise they ran in the thread's cleanup, after the abort - and were lost.
+        thread = self._thread
+        if self._ready and thread and thread.is_alive() and thread is not current_thread():
+            try:
+                self._call(lambda: None, timeout=2.0)
+            except:
+                pass  # The RDP thread is stuck: stop anyway.
+            # Sent is not yet read: closing with server updates still unread makes the socket close
+            # with a TCP reset, and the server discards what it had not read - the last key presses.
+            # Linger until INPUT_LINGER after the last input (only when there was any just now).
+            linger = self._lastInputAt + INPUT_LINGER - monotonic()  # type: float
+            if linger > 0:
+                sleep(min(linger, INPUT_LINGER))
         self._stop = True  # type: bool
         # self._paused = False  # type: bool
         if self._ctx:
@@ -535,6 +609,7 @@ class RDPApplication(object):
         if thread and thread.is_alive() and thread is not current_thread():
             thread.join(timeout=10)
         self._resetState()
+        self._restoreAzureADEnvironment()
         _markSession(False)  # a clean stop: not a crash.
 
     def setPaused(self, paused):
@@ -821,7 +896,7 @@ class RDPApplication(object):
     def saveClipboard(self, preferredType, data, includeParent=False):
         """
         Sets the remote clipboard to this preferred type.
-        :param preferredType: (str | unicode) Value of either `text` or `file`
+        :param preferredType: (str | unicode) Value of either `text` or `file`.
         :param data: (str | unicode) String or path to either a dir or a file. Path is used when set to
                      file mode and string when texted.
         :param includeParent: (bool) Set to True if the parent of path be included while saving the clipboard.
@@ -859,11 +934,12 @@ class RDPApplication(object):
         The folder appears on the remote machine as a redirected drive
         (in Explorer under "This PC" as "<dirName> on <client>"). A path to a
         file shares the folder that contains it. Several folders can be shared;
-        each must be added before `start`, or the session has to be restarted for it to appear.
+        each must be added before `start`, or the session has to be restarted
+        for it to appear.
         :param dirPath: (str | unicode) Path to the directory.
         :param dirName: (str | unicode) Name of the directory, if left empty the system directory name will be used.
         :raises ValueError: The path does not exist.
-        :return: None
+        :return:
         """
         pth = abspath(expanduser(dirPath))  # type: str
         if isfile(pth):
@@ -1023,14 +1099,14 @@ class RDPApplication(object):
         the negotiated RDP version and security protocol, and what FreeRDP received from the server
         while connecting (see `getServerInfo`; None before the first connection).
         :return: (dict) Keys: server, port, username, domain, width, height, bitsPerPixel, graphics,
-            graphicsPipeline, sound, microphone, compressedAudio, clipboard, fileClipboard,
-            sharedDirectories, running, ready, reconnecting, lastError, framesPublished, freerdpVersion,
-            rdpVersion, securityProtocol, serverInfo.
+            graphicsPipeline, sound, microphone, compressedAudio, clipboard, fileClipboard, sharedDirectories, running,
+            ready, reconnecting, lastError, framesPublished, freerdpVersion, rdpVersion, securityProtocol, serverInfo,
+            azureAD, transport.
         """
         try:
             version = self._api.version()  # type: str
         except:
-            version = ''  # type: str
+            version = u''  # type: str
         return {
             u'server': self._host,
             u'port': self._port,
@@ -1056,6 +1132,8 @@ class RDPApplication(object):
             u'rdpVersion': self._rdpVersion,
             u'securityProtocol': self._securityProtocol,
             u'serverInfo': self.getServerInfo(),
+            u'azureAD': dict(self.getAzureAD(), helperPath=self._aadResolved[0] if self._aadResolved else None),
+            u'transport': self._transport,
         }
 
     def getServerInfo(self):
@@ -1156,6 +1234,119 @@ class RDPApplication(object):
             except:
                 _log.exception(u'Disconnect listener failed')
 
+    def setAzureAD(self, enabled, helper=u'auto', userAgent=u''):
+        """
+        Signs in with Azure AD (Entra ID) instead of a password (RDS AAD: Azure / Entra joined hosts,
+        Azure Virtual Desktop). The Microsoft login page opens in a FreeRDP AAD helper - a separate
+        program shipped with pyfreerdpnative - and the session gets its access token from there.
+        Set it before `start`.
+        :param enabled: (bool) True to sign in with Azure AD.
+        :param helper: (str | unicode) `auto` (the webview helper, else the Qt one), `webview` (the
+            operating system's browser engine: WebKitGTK, WKWebView, Edge WebView2), `qt` (Qt
+            WebEngine - from the system, PySide6-WebEngine or PyQt6-WebEngine), or the path to any
+            program speaking FreeRDP's AAD helper protocol.
+        :param userAgent: (str | unicode) User-Agent the login page sees (FreeRDP 3.33
+            /azure:user-agent); empty for the browser's own.
+        :return:
+        """
+        self._aad = bool(enabled)  # type: bool
+        self._aadHelper = u'{}'.format(helper or u'auto')
+        self._aadUserAgent = u'{}'.format(userAgent or u'')
+
+    def getAzureAD(self):
+        """
+        Returns the Azure AD sign-in configuration.
+        :return: (dict) Keys: enabled (bool), helper (str), userAgent (str).
+        """
+        return {u'enabled': self._aad, u'helper': self._aadHelper, u'userAgent': self._aadUserAgent}
+
+    def setTransport(self, mode):
+        """
+        Chooses the transport (FreeRDP 3.33 client UDP multitransport, needs a FreeRDP built with
+        WITH_RDPEUDP): `default` (FreeRDP's choice), `udp` (accept the server's UDP offer),
+        `udp-preferred` (also carry the static channels over UDP) or `tcp-only` (decline UDP).
+        Set it before `start`.
+        :param mode: (str | unicode) One of default, udp, udp-preferred, tcp-only.
+        :return:
+        """
+        mode = u'{}'.format(mode or u'default').lower()
+        if mode not in TRANSPORTS:
+            raise ValueError(u'Transport must be one of: {}'.format(u', '.join(TRANSPORTS)))
+        self._transport = mode
+
+    def getTransport(self):
+        """
+        Returns the transport set with `setTransport`.
+        :return: (str | unicode) default, udp, udp-preferred or tcp-only.
+        """
+        return self._transport
+
+    def _resolveAzureAD(self):
+        """
+        Find the AAD helper (pyfreerdpnative.aad) and give it its environment - the Qt helper needs
+        to find a Qt WebEngine. On the calling thread, so a missing helper fails start() at once.
+        FreeRDP starts the helper with this process's environment, while connecting.
+        :return:
+        """
+        self._restoreAzureADEnvironment()  # A retry must not save our own values as the originals.
+        self._aadResolved = None
+        if not self._aad:
+            return
+        try:
+            from pyfreerdpnative.aad import helper
+        except:
+            raise ConnectionError(u'Azure AD sign-in needs pyfreerdpnative with FreeRDP 3.33 (pyfreerdpnative.aad)')
+        try:
+            helperPath, env = helper(self._aadHelper)
+        except LookupError as exc:
+            raise ConnectionError(u'Azure AD sign-in: {}'.format(exc))
+        if not self._api.has(u'client_helper_get_access_token'):
+            raise ConnectionError(u'Azure AD sign-in: these FreeRDP libraries have no client_helper_get_access_token')
+        self._aadSavedEnv = dict((k, environ.get(k)) for k in env)
+        environ.update(env)
+        self._aadResolved = (helperPath, env)
+        _log.info(u'Azure AD sign-in through %s', helperPath)
+
+    def _restoreAzureADEnvironment(self):
+        """
+        :return:
+        """
+        saved, self._aadSavedEnv = self._aadSavedEnv, None
+        for key, value in (saved or {}).items():
+            if value is None:
+                environ.pop(key, None)
+            else:
+                environ[key] = value
+
+    def _applyAzureADAndTransport(self, settings):
+        """
+        The settings /azure:auth-helper:, /azure:user-agent: and /multitransport: would set.
+        :param settings: POINTER(rdpSettings)
+        :return: None
+        """
+        if self._aadResolved:
+            helperPath, _env = self._aadResolved
+            strings = [(FreeRDP_AadAuthHelper, helperPath)]
+            if FreeRDP_AadAuthUserAgent is not None:
+                strings.append((FreeRDP_AadAuthUserAgent, self._aadUserAgent))
+            self._writeSettings(settings, strings=tuple(strings), flags=((FreeRDP_AadSecurity, True),))
+            # FreeRDP's own C implementation drives the helper: GetAccessToken is variadic, which a
+            # Python callback cannot implement - the C function's address goes in instead.
+            instance = self._instance.contents
+            address = cast(self._api.client_helper_get_access_token, c_void_p).value
+            instance.GetAccessToken = type(instance.GetAccessToken)(address)
+        udpKey = FreeRDP_SupportMultitransportUdp
+        if self._transport == u'default' or udpKey is None:
+            return
+        udp = self._transport != u'tcp-only'
+        flags = []
+        if udp:  # client/common/cmdline.c, /multitransport:udp[-preferred]
+            value = TRANSPORT_TYPE_UDP_FECR | SOFTSYNC_TCP_TO_UDP
+            if self._transport == u'udp-preferred':
+                value |= TRANSPORT_TYPE_UDP_PREFERRED
+            flags = [(FreeRDP_MultitransportFlags, value)]
+        self._writeSettings(settings, flags=((udpKey, udp),), numbers=tuple(flags))
+
     def setSound(self, enabled, microphone=False, compressed=True):
         """
         Enables the remote sound: audio played on the remote machine is played
@@ -1171,6 +1362,268 @@ class RDPApplication(object):
         self._sound = bool(enabled)  # type: bool
         self._microphone = bool(microphone)  # type: bool
         self._compressedAudio = bool(compressed)  # type: bool
+
+    def setAudioLatency(self, milliseconds):
+        """
+        Sets the audio playback buffer target, in milliseconds (default 50; 0 = the audio backend's own
+        default, 100 for PulseAudio/PipeWire). FreeRDP reports the real playback latency to the server in
+        every Wave Confirm and the server synchronizes audio and video with it, so a short buffer keeps the
+        sound with the picture; raise it on a jittery network if the sound stutters. Set it before `start`.
+        :param milliseconds: (int) 0 to 2000.
+        :raises ValueError: Out of range.
+        :return:
+        """
+        milliseconds = int(milliseconds)
+        if not 0 <= milliseconds <= 2000:
+            raise ValueError(u'Audio latency must be 0 to 2000 ms')
+        self._audioLatency = milliseconds  # type: int
+
+    def getAudioLatency(self):
+        """
+        Returns the audio playback buffer target set with `setAudioLatency`.
+        :return: (int) Milliseconds; 0 = the backend's default.
+        """
+        return self._audioLatency
+
+    def setStartProgram(self, command, workingDir=u''):
+        """
+        Starts a program with the session, through the protocol (no keyboard, no clipboard): it is sent with
+        the logon information and the server runs it instead of the desktop - the "alternate shell"
+        (mstsc's "Start the following program on connection"). When it exits, the session ends. The server
+        must allow it (policy "Start a program on connection"; Windows client editions may ignore it).
+        Set it before `start`; an empty command turns it off.
+        :param command: (str | unicode) The command line, e.g. `notepad` or `cmd /k ipconfig`.
+        :param workingDir: (str | unicode) Its working folder (optional).
+        :return:
+        """
+        self._startProgram = (u'{}'.format(command or u'').strip(), u'{}'.format(workingDir or u''))
+
+    def getStartProgram(self):
+        """
+        Returns the program set with `setStartProgram`.
+        :return: (tuple[str, str]) (command line, working folder); empty when none.
+        """
+        return self._startProgram
+
+    def setRemoteApp(self, program, arguments=u'', workingDir=u''):
+        """
+        Connects as a RemoteApp session: the server runs the program and the session shows its windows,
+        not a desktop. Programs are started through the RemoteApp channel (MS-RDPERP Client Execute) - no
+        keyboard, no clipboard - and more can be started later with `runCommand`. The server must offer
+        RemoteApp and allow the program (published, or "Allow remote start of unlisted programs"). Set it
+        before `start`; an empty program turns it off.
+        :param program: (str | unicode) The program, e.g. `notepad` or a full path.
+        :param arguments: (str | unicode) Its command-line arguments (optional).
+        :param workingDir: (str | unicode) Its working folder (optional; %VARIABLES% are expanded).
+        :return:
+        """
+        program = u'{}'.format(program or u'').strip()
+        self._remoteApp = (program, u'{}'.format(arguments or u''),
+                           u'{}'.format(workingDir or u'')) if program else None
+
+    def getRemoteApp(self):
+        """
+        Returns the RemoteApp set with `setRemoteApp`.
+        :return: (tuple[str, str, str] | None) (program, arguments, working folder), or None.
+        """
+        return self._remoteApp
+
+    def isRemoteApp(self):
+        """
+        :return: (bool) True while connected as a RemoteApp session with its channel up (`runCommand` works).
+        """
+        return bool(self._remoteApp and self._rail)
+
+    def runCommand(self, program, arguments=u'', workingDir=u'', timeout=15.0):
+        """
+        Starts another program in a RemoteApp session through the protocol (Client Execute on the RemoteApp
+        channel - no keyboard, no clipboard) and waits for the server's answer.
+        :param program: (str | unicode) The program, e.g. `cmd` or a full path.
+        :param arguments: (str | unicode) Its arguments (optional; %VARIABLES% are expanded).
+        :param workingDir: (str | unicode) Its working folder (optional).
+        :param timeout: (float | int) Seconds to wait for the server's answer.
+        :raises ValueError: No program given.
+        :raises RuntimeError: Not a RemoteApp session, or the server refused - with its reason (not
+            allowed, not found, session locked...).
+        :raises TimeoutError: The server did not answer.
+        :return:
+        """
+        program = u'{}'.format(program or u'').strip()
+        if not program:
+            raise ValueError(u'Nothing to run')
+        if not self.isRemoteApp():
+            raise RuntimeError(u'Without keyboard or clipboard, RDP starts programs only through RemoteApp: connect '
+                               u'with setRemoteApp (or start one program with the session: setStartProgram).')
+        with self._execCondition:
+            seen = len(self._execResults)
+        texts = [x.encode(u'utf-8') for x in (program, u'{}'.format(workingDir or u''), u'{}'.format(arguments or u''))]
+
+        def send():
+            """
+            :return: (int) The channel's status.
+            """
+            order = RAIL_EXEC_ORDER()
+            order.flags = RAIL_EXEC_FLAGS
+            order.RemoteApplicationProgram, order.RemoteApplicationWorkingDir, order.RemoteApplicationArguments = texts
+            return self._rail.contents.ClientExecute(self._rail, byref(order))
+
+        status = self._call(send)
+        if status:
+            raise RuntimeError(u'The RemoteApp channel did not send the request (error {})'.format(status))
+        with self._execCondition:
+            if not self._execCondition.wait_for(lambda: len(self._execResults) > seen, timeout):
+                raise TimeoutError(u'The server did not answer within {:g} s'.format(timeout))
+            result, raw = self._execResults[seen]
+        if result != RAIL_EXEC_S_OK:
+            raise RuntimeError(u'{} could not be started: {} (code {}, 0x{:08X})'.format(
+                program, RAIL_EXEC_ERRORS.get(result, u'error'), result, raw))
+
+    def _applyPrograms(self, settings):
+        """
+        The program to start, through the protocol: the alternate shell of a desktop session (sent with
+        the logon information) and/or a RemoteApp session (FreeRDP then loads the rail channel).
+        :param settings: POINTER(rdpSettings)
+        :return:
+        """
+        shell, shellDir = self._startProgram
+        if self._remoteApp:
+            program, arguments, workingDir = self._remoteApp
+            self._writeSettings(settings, flags=((FreeRDP_RemoteApplicationMode, True),),
+                                strings=((FreeRDP_RemoteApplicationProgram, program),
+                                         (FreeRDP_RemoteApplicationName, basename(program)),
+                                         (FreeRDP_RemoteApplicationCmdLine, arguments),
+                                         (FreeRDP_ShellWorkingDirectory, workingDir)))
+        elif shell:
+            self._writeSettings(
+                settings, strings=((FreeRDP_AlternateShell, shell), (FreeRDP_ShellWorkingDirectory, shellDir)))
+
+    def waitForRemoteApp(self, timeout=15.0):
+        """
+        Waits for the server's answer on the program of a RemoteApp session (`setRemoteApp`): it is
+        started through the RemoteApp channel while the session comes up.
+        :param timeout: (float | int) Seconds to wait.
+        :raises RuntimeError: The server refused it - with its reason (not allowed, not found...).
+        :raises TimeoutError: No answer (not a RemoteApp session, or a server without RemoteApp).
+        :return:
+        """
+        with self._execCondition:
+            if not self._execCondition.wait_for(lambda: bool(self._execResults), timeout):
+                raise TimeoutError(u'The server did not start the RemoteApp within {:g} s'.format(timeout))
+            result, raw = self._execResults[0]
+        if result != RAIL_EXEC_S_OK:
+            program = (self._remoteApp or (u'the program',))[0]
+            raise RuntimeError(u'{} could not be started: {} (code {}, 0x{:08X})'.format(
+                program, RAIL_EXEC_ERRORS.get(result, u'error'), result, raw))
+
+    def _railHandshake(self, context, handshake):
+        """
+        RDP thread: the server's RemoteApp handshake. FreeRDP's own start sequence answers it - client
+        information, system parameters, then Client Execute of the program set with setRemoteApp.
+        :return: (int) Channel status.
+        """
+        return self._api.client_rail_server_start_cmd(context)
+
+    def _railExecuteResult(self, context, result):
+        """
+        RDP thread: the server's verdict on a Client Execute.
+        :return: (int) Channel status.
+        """
+        entry = (int(result.contents.execResult), int(result.contents.rawResult))
+        with self._execCondition:
+            self._execResults.append(entry)
+            self._execCondition.notify_all()
+        if entry[0] != RAIL_EXEC_S_OK:
+            _log.warning(u'RemoteApp refused: %s (code %d)', RAIL_EXEC_ERRORS.get(entry[0], u'error'), entry[0])
+        return 0
+
+    def _attachRail(self, iface):
+        """
+        The RemoteApp channel is up: answer the handshake, collect execute results.
+        :param iface: (int) The RailClientContext*.
+        :return:
+        """
+        rail = cast(iface, POINTER(RailClientContext))
+        contents = rail.contents
+        handshake = type(contents.ServerHandshake)(self._railHandshake)
+        handshakeEx = type(contents.ServerHandshakeEx)(lambda ctx, hs: self._railHandshake(ctx, hs))
+        result = type(contents.ServerExecuteResult)(self._railExecuteResult)
+        self._railRefs = [handshake, handshakeEx, result]
+        contents.ServerHandshake, contents.ServerHandshakeEx, contents.ServerExecuteResult = self._railRefs
+        # FreeRDP calls these handlers only while `custom` is set - its own clients put their context there.
+        contents.custom = cast(self._ctx, c_void_p)
+        self._rail = rail
+
+    def uploadFiles(self, paths, toDesktop=True, timeout=600.0, progress=None):
+        """
+        Uploads files or folders into the remote session: they go on the remote clipboard and the session
+        pastes them - on the desktop (Win+D, a click on it, Ctrl+V), or with toDesktop=False wherever the
+        remote focus is (e.g. an open Explorer folder) - and the remote side downloads them through the
+        clipboard channel. Blocks until every byte has arrived: run it on a worker thread in a GUI.
+        :param paths: (str | unicode | list[str]) Files and/or folders.
+        :param toDesktop: (bool) True: paste on the remote desktop; False: paste where the focus is.
+        :param timeout: (float | int) Seconds the transfer may take once started.
+        :param progress: (callable | None) progress(received, total) with byte counts, repeatedly.
+        :raises FileNotFoundError: A path does not exist.
+        :raises PermissionError: The server forbids file copy through the clipboard (its policy).
+        :raises TimeoutError: Nothing was pasted, or the transfer did not finish in time.
+        :return: (int) The bytes delivered.
+        """
+        paths = [paths] if hasattr(paths, u'encode') else list(paths)
+        paths = [abspath(p) for p in paths]
+        missing = [p for p in paths if not exists(p)]
+        if not paths or missing:
+            raise FileNotFoundError(u'No such file: {}'.format(u', '.join(missing) or u'(none given)'))
+        deadline = monotonic() + 20
+        while not self.isFileClipboardEnabled and monotonic() < deadline:
+            sleep(0.2)
+        if not self.isFileClipboardEnabled:
+            raise PermissionError(u'The server does not allow copying files through the clipboard (its Remote '
+                                  u'Desktop policy) - share the folder instead and copy from \\\\tsclient.')
+        self.saveClipboard(u'file', paths if len(paths) > 1 else paths[0])
+        received, total = self.getFileTransferProgress()
+        if toDesktop:
+            width, height = self.getDisplaySize()
+            target = int(width * 0.6), int(height * 0.45)  # most likely empty; an icon there is only selected
+            self.hotkey(LEFT_WINDOW, KEY_D)  # show the desktop - a toggle, so sent once only
+            sleep(1.0)
+        for attempt in (1, 2):
+            if toDesktop:
+                self.leftMouseDown(*target)
+                self.leftMouseUp(*target)
+                sleep(0.3)
+            self.hotkey(LEFT_CONTROL, KEY_V)  # paste - the remote side downloads the files
+            deadline = monotonic() + 15
+            while monotonic() < deadline and not (self.getFileTransferProgress()[0] > 0 or
+                                                  (total == 0 and self.isFileTransferFinished)):
+                sleep(0.2)
+            if self.getFileTransferProgress()[0] > 0 or (total == 0 and self.isFileTransferFinished):
+                break
+            # Nothing requested at all: no paste happened, so a retry cannot duplicate the files.
+        else:
+            raise TimeoutError(u'The remote side did not paste - is the session showing its desktop (not a '
+                               u'logon, first-logon or permission screen)?')
+        deadline = monotonic() + timeout
+        while not self.isFileTransferFinished and monotonic() < deadline:
+            if progress is not None:
+                progress(*self.getFileTransferProgress())
+            sleep(0.25)
+        received, total = self.getFileTransferProgress()
+        if progress is not None:
+            progress(received, total)
+        if not self.isFileTransferFinished:
+            raise TimeoutError(u'Upload incomplete: {:,} of {:,} bytes after {:g} s'.format(received, total, timeout))
+        return total
+
+    def setFrameListener(self, listener):
+        """
+        Registers a function called whenever a new frame is published - the moment FreeRDP has
+        finished painting it - so a viewer can show it at once instead of polling. It is called
+        from the RDP thread as listener(), outside every lock: keep it short (e.g. emit a queued
+        Qt signal) and fetch the frame from your own thread. None unregisters.
+        :param listener: (callable | None) The function.
+        :return:
+        """
+        self._frameListener = listener
 
     def setPointerListener(self, listener):
         """
@@ -1220,6 +1673,14 @@ class RDPApplication(object):
         """
         return self._clipboard.uploadFinished()
 
+    def getFileTransferProgress(self):
+        """
+        Returns how much of the files on the remote clipboard (`saveClipboard` in file mode) the remote
+        side has received - it downloads them when they are pasted there.
+        :return: (tuple[int, int]) (bytes received, bytes offered).
+        """
+        return self._clipboard.uploadProgress()
+
     @property
     def isFileClipboardEnabled(self):
         """
@@ -1241,7 +1702,7 @@ class RDPApplication(object):
         Used to configure FreeRdp via its command-line options.
         Compatible args can be found at https://github.com/FreeRDP/FreeRDP/wiki/CommandLineInterface
         :param cliArgs: (str | unicode | list[str | unicode]) Arguments either as a string with spaces between
-                        arguments or a list of arguments.
+                                                              arguments or a list of arguments.
         :return:
         """
         if hasattr(cliArgs, u'encode'):
@@ -1362,6 +1823,9 @@ class RDPApplication(object):
                 code = api.freerdp_get_last_error(self._ctx)
                 message = api.freerdp_get_last_error_string(code)
                 self._error = u'%s (0x%08X)' % (message.decode() if message else u'connect failed', code)
+                if code == FREERDP_ERROR_CONNECT_NTLM_BLOCKED:
+                    self._error += (u' - The server refuses NTLM sign-in (its policy, or a CredSSP security update'
+                                    u' mismatch): sign in with Azure AD (setAzureAD / --azure-ad) or Kerberos.')
                 if code == FREERDP_ERROR_CONNECT_LOGON_FAILURE:
                     self._error += u' - ' + self._explainLogonFailure()
                 _log.error(u'Connect failed: %s', self._error)
@@ -1397,6 +1861,7 @@ class RDPApplication(object):
         # DOMAIN\user is split like FreeRDP's /u: does; an explicit domain wins.
         user, typedDomain = parseUsername(self._user)
         self._sentIdentity = (user, self._domain or typedDomain)  # For the logon-failure message.
+        self._applyPrograms(settings)
         self._writeSettings(
             settings,
             strings=((FreeRDP_ServerHostname, self._host), (FreeRDP_Username, user),
@@ -1430,9 +1895,12 @@ class RDPApplication(object):
         # compressed audio is turned off). FreeRDP's add-in loader sees them
         # already present and only adds rdpdr, which rdpsnd needs.
         audioFormat = [] if self._compressedAudio else [b'format:1']
+        # A short playback buffer: FreeRDP reports the real latency in each Wave Confirm, and the
+        # server syncs audio and video with it - the smaller it is, the closer sound and picture are.
+        playback = audioFormat + ([u'latency:{}'.format(self._audioLatency).encode()] if self._audioLatency else [])
         if self._sound:
-            self._addChannel(settings, u'static', [b'rdpsnd'] + audioFormat)
-            self._addChannel(settings, u'dynamic', [b'rdpsnd'] + audioFormat)
+            self._addChannel(settings, u'static', [b'rdpsnd'] + playback)
+            self._addChannel(settings, u'dynamic', [b'rdpsnd'] + playback)
         if self._microphone:
             self._addChannel(settings, u'dynamic', [b'audin'] + audioFormat)
         self._writeSettings(
@@ -1441,6 +1909,7 @@ class RDPApplication(object):
         args = list(self._cliArgs)
         if args:
             self._parseCliArgs(settings, args)
+        self._applyAzureADAndTransport(settings)
 
     def _writeSettings(self, settings, strings=(), numbers=(), flags=()):
         """
@@ -1530,6 +1999,8 @@ class RDPApplication(object):
         name, iface = event.contents.name, event.contents.pInterface
         if name == CLIPRDR_SVC_CHANNEL_NAME.encode() and iface:
             self._clipboard.attach(iface)
+        elif name == RAIL_SVC_CHANNEL_NAME.encode() and iface:
+            self._attachRail(iface)
         elif name == RDPGFX_DVC_CHANNEL_NAME.encode() and iface and self._gdi:
             # what xfreerdp/sdl-freerdp do: GFX surfaces render into the GDI.
             # pInterface is a void* (a plain int in Python); the function is
@@ -1544,6 +2015,8 @@ class RDPApplication(object):
         name = event.contents.name  # type: str
         if name == CLIPRDR_SVC_CHANNEL_NAME.encode():
             self._clipboard.detach()
+        elif name == RAIL_SVC_CHANNEL_NAME.encode():
+            self._rail = None
         elif name == RDPGFX_DVC_CHANNEL_NAME.encode() and self._gfx and self._gdi:
             self._api.gdi_graphics_pipeline_uninit(self._gdi, self._gfx)
             self._gfx = None
@@ -1780,7 +2253,15 @@ class RDPApplication(object):
 
     def _publishFrame(self):
         with self._gdiLock:
+            before = self._frameGen
             self._publishFrameLocked()
+            published = self._frameGen != before
+        listener = self._frameListener
+        if published and listener is not None:  # outside the locks: a viewer never stalls FreeRDP
+            try:
+                listener()
+            except Exception:
+                _log.exception(u'Frame listener failed')
 
     def _publishFrameLocked(self):
         """
@@ -1806,9 +2287,9 @@ class RDPApplication(object):
         if resized:
             x, y, w, h = 0, 0, width, height
         else:
-            x, y = max(0, int(region.x)), max(0, int(region.y))
-            w = min(width, int(region.x) + int(region.w)) - x
-            h = min(height, int(region.y) + int(region.h)) - y
+            x, y = max(0, int(region.x)), max(0, int(region.y))  # type: int, int
+            w = min(width, int(region.x) + int(region.w)) - x  # type: int
+            h = min(height, int(region.y) + int(region.h)) - y  # type: int
             if w <= 0 or h <= 0:
                 return
         source = addressof(gdi.primary_buffer.contents)
@@ -1850,9 +2331,9 @@ class RDPApplication(object):
             width, height, stride = self._fbInfo
             channels = self._bpp // 8  # type: int
             if lastGen < 0 or self._dirty is None:
-                x0, y0, x1, y1 = 0, 0, width, height
+                x0, y0, x1, y1 = 0, 0, width, height  # type: int, int, int, int
             else:
-                x0, y0, x1, y1 = self._dirty
+                x0, y0, x1, y1 = self._dirty  # type: int, int, int, int
             self._dirty = None
             row = (x1 - x0) * channels  # type: int
             fb, start = self._fb, x0 * channels
@@ -1997,24 +2478,32 @@ class RDPApplication(object):
         rdpInput = self._ctx.contents.input
         return rdpInput if rdpInput else None
 
+    def _keyboardTarget(self, down):
+        """
+        What every keyboard event needs: the session's input object and the press/release flags.
+        :param down: (bool) True for a press.
+        :return: (tuple) (rdpInput or None, flags)
+        """
+        return self._rdpInput(), (0 if down else KBD_FLAGS_RELEASE)
+
     def _sendScancode(self, scancode, down):
-        rdpInput = self._rdpInput()
+        rdpInput, flags = self._keyboardTarget(down)
         if rdpInput is None:
             return
-        flags = 0 if down else KBD_FLAGS_RELEASE
         if scancode & 0x0100:
             flags |= KBD_FLAGS_EXTENDED
         self._api.freerdp_input_send_keyboard_event(rdpInput, flags, scancode & 0xFF)
+        self._lastInputAt = monotonic()  # type: float
 
     def _sendUnicode(self, char, down):
-        rdpInput = self._rdpInput()
+        rdpInput, flags = self._keyboardTarget(down)
         if rdpInput is None:
             return
-        flags = 0 if down else KBD_FLAGS_RELEASE  # type: int
-        # characters outside the BMP travel as a UTF-16 surrogate pair
+        # Characters outside the BMP travel as a UTF-16 surrogate pair.
         units = char.encode(u'utf-16-le')
         for i in range(0, len(units), 2):
             self._api.freerdp_input_send_unicode_keyboard_event(rdpInput, flags, units[i] | (units[i + 1] << 8))
+        self._lastInputAt = monotonic()
 
     def _mouse(self, flags, x, y):
         self._checkConnected()
@@ -2029,5 +2518,6 @@ class RDPApplication(object):
             rdpInput = self._rdpInput()
             if rdpInput is not None:
                 self._api.freerdp_input_send_mouse_event(rdpInput, flags, x, y)
+                self._lastInputAt = monotonic()  # type: float
 
         self._post(send)

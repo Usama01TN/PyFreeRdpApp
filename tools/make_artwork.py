@@ -33,10 +33,10 @@ SMALL_UP_TO = 32  # type: int  # Sizes up to this use the simplified drawing.
 def pointer(x, y, scale, outline):
     """
     The pointer: an arrow with its tip at (x, y).
-    :param x: (float) Tip x.
-    :param y: (float) Tip y.
-    :param scale: (float) 1.0 = 118 units tall.
-    :param outline: (float) Outline width.
+    :param x: (float | int) Tip x.
+    :param y: (float | int) Tip y.
+    :param scale: (float | int) 1.0 = 118 units tall.
+    :param outline: (float | int) Outline width.
     :return: (str | unicode) An SVG path element.
     """
     points = ((0, 0), (0, 118), (30, 90), (52, 138), (74, 128), (52, 81), (94, 77))
@@ -89,7 +89,7 @@ def makeFont(family, pixelSize, weight, spacing=0.0):
     :param family: (str | unicode) Font family.
     :param pixelSize: (int) Font size in px.
     :param weight: (int) QFont weight.
-    :param spacing: (float) Extra letter spacing, px.
+    :param spacing: (float | int) Extra letter spacing, px.
     :return: QFont
     """
     font = QFont(family)  # type: QFont
@@ -106,10 +106,10 @@ def textPath(text, family, pixelSize, weight, x, y, fill, spacing=0.0):
     :param family: (str | unicode) Font family.
     :param pixelSize: (int) Font size in px.
     :param weight: (int) QFont weight.
-    :param x: (float) Left of the baseline.
-    :param y: (float) Baseline.
+    :param x: (float | int) Left of the baseline.
+    :param y: (float | int) Baseline.
     :param fill: (str | unicode) Color.
-    :param spacing: (float) Extra letter spacing, px.
+    :param spacing: (float | int) Extra letter spacing, px.
     :return: (str | unicode) An SVG path element.
     """
     font = makeFont(family, pixelSize, weight, spacing)  # type: QFont
@@ -137,8 +137,8 @@ def titleWidth(text, family, pixelSize, weight, spacing=0.0):
     :param family: (str | unicode) Font family.
     :param pixelSize: (int) Font size in px.
     :param weight: (int) QFont weight.
-    :param spacing: (float) Extra letter spacing, px.
-    :return: (float) Width in px.
+    :param spacing: (float | int) Extra letter spacing, px.
+    :return: (float | int) Width in px.
     """
     font = makeFont(family, pixelSize, weight, spacing)  # type: QFont
     path = QPainterPath()  # type: QPainterPath
@@ -233,8 +233,8 @@ def main():
         fh.write(banner)
     render(banner, 1280, 640).save(join(ASSETS, u'banner.png'))
     render(banner, 2560, 1280).save(join(ASSETS, u'banner@2x.png'))
-    print(u'icon: {} sizes + svg/ico/icns in {}'.format(len(ICON_SIZES), IMAGES))
-    print(u'banner: svg + png (1x, 2x) in {}'.format(ASSETS))
+    print(u'Icon: {} sizes + svg/ico/icns in {}'.format(len(ICON_SIZES), IMAGES))
+    print(u'Banner: svg + png (1x, 2x) in {}'.format(ASSETS))
     del app
     return 0
 
