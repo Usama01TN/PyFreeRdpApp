@@ -37,7 +37,7 @@ while not app.isReady:
     pass
 app.typeText('Hello')
 app.hotkey(LEFT_CONTROL, KEY_A)     # Ctrl+A
-frame = app.getDisplay()                              # numpy (h, w, bpp/8), BGR(A)
+frame = app.getDisplay()            # numpy (h, w, bpp/8), BGR(A)
 app.stop()
 ```
 
