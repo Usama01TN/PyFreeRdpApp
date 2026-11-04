@@ -3,20 +3,22 @@ name: Release
 # Push a tag vX.Y.Z (matching the version in pyproject.toml and PyFreeRdpApp/metadata.py):
 #   tests -> build -> install check on Linux/Windows/macOS -> publish -> GitHub Release.
 # Where a tag publishes is the repository variable PYPI_AUTO_TARGET (testpypi | pypi | none;
-# testpypi when unset). "Run workflow" (workflow_dispatch) picks the target by hand; publishing and
-# GitHub Releases need a tag, a dry run (target none, no release) works from any branch.
+# testpypi when unset). "Run workflow" (workflow_dispatch) picks the target by hand. Started from a branch
+# (e.g. main), a publication or GitHub Release releases the tag v<version>: its own code when the tag
+# exists, else a new tag at this commit (created with the GitHub Release). A dry run (target none, no
+# release) tests and builds the branch itself.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       target:
-        description: Where to publish (needs "Use workflow from" set to the tag, e.g. v4.3.0).
+        description: Where to publish (from a branch, the tag v<version> is released).
         type: choice
         options: [none, testpypi, pypi]
         default: none
       github-release:
-        description: Create the GitHub Release (needs "Use workflow from" set to the tag).
+        description: Create the GitHub Release (from a branch, creates the tag v<version> when missing).
         type: boolean
         default: false
 
@@ -36,6 +38,9 @@ jobs:
       prerelease: ${{ steps.plan.outputs.prerelease }}
       target: ${{ steps.plan.outputs.target }}
       release: ${{ steps.plan.outputs.release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      ref: ${{ steps.plan.outputs.ref }}
+      create_tag: ${{ steps.plan.outputs.create_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,20 +59,27 @@ jobs:
           AUTO_TARGET: ${{ vars.PYPI_AUTO_TARGET }}
         run: |
           python - <<'EOF'
-          import ast, os, re, sys, tomllib
+          import ast, os, re, subprocess, sys, tomllib
 
           def fail(message):
               print('::error::' + message)
               sys.exit(1)
 
-          with open('pyproject.toml', 'rb') as fh:
-              version = tomllib.load(fh)['project']['version']
-          with open('PyFreeRdpApp/metadata.py', encoding='utf-8') as fh:
-              tree = ast.parse(fh.read())
-          meta = next((node.value.value for node in tree.body if isinstance(node, ast.Assign)
-                       and any(getattr(t, 'id', '') == '__version__' for t in node.targets)), None)
-          if meta != version:
-              fail('version mismatch: pyproject.toml says %s, PyFreeRdpApp/metadata.py says %s' % (version, meta))
+          def git(*args):
+              return subprocess.run(['git'] + list(args), capture_output=True, text=True)
+
+          def versionOf(read, where):
+              """The version in pyproject.toml and PyFreeRdpApp/metadata.py, which must agree."""
+              version = tomllib.loads(read('pyproject.toml'))['project']['version']
+              tree = ast.parse(read('PyFreeRdpApp/metadata.py'))
+              meta = next((node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                           and any(getattr(t, 'id', '') == '__version__' for t in node.targets)), None)
+              if meta != version:
+                  fail('version mismatch in %s: pyproject.toml says %s, PyFreeRdpApp/metadata.py says %s'
+                       % (where, version, meta))
+              return version
+
+          version = versionOf(lambda path: open(path, encoding='utf-8').read(), 'this commit')
 
           tag = os.environ['REF_NAME'] if os.environ['REF_TYPE'] == 'tag' else None
           if tag is not None and tag != 'v' + version:
@@ -81,19 +93,37 @@ jobs:
               release = os.environ.get('INPUT_RELEASE') == 'true'
           if target not in ('none', 'testpypi', 'pypi'):
               fail('PYPI_AUTO_TARGET must be testpypi, pypi or none, not %r' % target)
+          # What the tests, the build and the release use: the tag when there is one, else this commit.
+          ref, createTag = tag or os.environ['GITHUB_SHA'], False
           if (target != 'none' or release) and tag is None:
-              fail('publishing and GitHub Releases need a tag, but this run is from %s %r. In "Run workflow", '
-                   'set "Use workflow from" to the tag v%s (Tags tab); or untick "GitHub Release" and keep the '
-                   'target "none" for a dry run from a branch.' % (os.environ['REF_TYPE'], os.environ['REF_NAME'], version))
+              # Started from a branch: release the tag v<version> - its own code when it exists.
+              tag = 'v' + version
+              if git('fetch', '--depth=1', 'origin', '+refs/tags/%s:refs/tags/%s' % (tag, tag)).returncode == 0:
+                  tagged = versionOf(lambda path: git('show', '%s:%s' % (tag, path)).stdout, 'tag ' + tag)
+                  if tagged != version:
+                      fail('tag %s is on a commit with version %s, but %s says %s. Move the tag to the right commit '
+                           '(git tag -f %s && git push -f origin %s) or raise the version'
+                           % (tag, tagged, os.environ['REF_NAME'], version, tag, tag))
+                  ref = tag
+                  print('started from %s %r: releasing the existing tag %s (its own code)'
+                        % (os.environ['REF_TYPE'], os.environ['REF_NAME'], tag))
+              elif release:
+                  createTag = True  # The GitHub Release job creates it at this commit.
+                  print('tag %s does not exist: the GitHub Release creates it at this commit' % tag)
+              else:
+                  fail('tag %s does not exist yet. Tick "GitHub Release" (it creates the tag at this commit), or '
+                       'push the tag first: git tag %s && git push origin %s' % (tag, tag, tag))
 
           prerelease = bool(re.search(r'(a|b|rc|\.dev)\d*$', version))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write('version=%s\nprerelease=%s\ntarget=%s\nrelease=%s\n'
-                        % (version, str(prerelease).lower(), target, str(release).lower()))
+              out.write('version=%s\nprerelease=%s\ntarget=%s\nrelease=%s\ntag=%s\nref=%s\ncreate_tag=%s\n'
+                        % (version, str(prerelease).lower(), target, str(release).lower(), tag or '', ref,
+                           str(createTag).lower()))
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('### PyFreeRdpApp %s\n\n| | |\n|---|---|\n| publish to | %s |\n'
-                            '| GitHub Release | %s |\n| pre-release | %s |\n'
-                            % (version, target, 'yes' if release else 'no', 'yes' if prerelease else 'no'))
+                            '| GitHub Release | %s |\n| pre-release | %s |\n| code | %s |\n'
+                            % (version, target, 'yes' if release else 'no', 'yes' if prerelease else 'no',
+                               ref + (' (tag created with the release)' if createTag else '')))
           print('version %s -> publish: %s, GitHub Release: %s, pre-release: %s' % (version, target, release, prerelease))
           EOF
 
@@ -103,6 +133,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       pyfreerdpnative-tag: ${{ vars.PYFREERDPNATIVE_TAG || '' }}
+      ref: ${{ needs.version.outputs.ref }}
 
   build:
     name: Build sdist and wheel
@@ -110,16 +141,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Absolute README links (PyPI cannot show the repository's relative images)
+        env:
+          LINK_REF: ${{ needs.version.outputs.ref }}  # The released tag (or commit): links that never change.
         run: |
           python - <<'EOF'
           import os, re
-          repo, ref = os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_REF_NAME']
+          repo, ref = os.environ['GITHUB_REPOSITORY'], os.environ['LINK_REF']
           raw = 'https://raw.githubusercontent.com/%s/%s/' % (repo, ref)
           blob = 'https://github.com/%s/blob/%s/' % (repo, ref)
 
@@ -305,7 +340,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.version.outputs.tag }}
+          CREATE_TAG: ${{ needs.version.outputs.create_tag }}
           VERSION: ${{ needs.version.outputs.version }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
           TARGET: ${{ needs.version.outputs.target }}
@@ -326,10 +362,12 @@ jobs:
           NOTES
           flags=()
           if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          # A run started from a branch without the tag creates it here, at the commit it tested and built.
+          if [ "$CREATE_TAG" = true ]; then flags+=(--target "$GITHUB_SHA"); else flags+=(--verify-tag); fi
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
             echo "release $TAG existed: files updated"
           else
-            gh release create "$TAG" dist/* --verify-tag --title "PyFreeRdpApp $VERSION" \
+            gh release create "$TAG" dist/* --title "PyFreeRdpApp $VERSION" \
               --notes-file notes.md --generate-notes "${flags[@]}"
           fi
