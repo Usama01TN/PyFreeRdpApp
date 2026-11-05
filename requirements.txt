@@ -1,4 +1,4 @@
-pyfreerdpnative
+pyfreerdpnative --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.33.0
 numpy
 pillow
 ManyQt
