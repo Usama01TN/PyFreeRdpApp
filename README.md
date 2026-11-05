@@ -14,7 +14,7 @@ It wraps the low-level ctypes bindings in a small, task-oriented
 ## Install:
 
 ```bash
-pip install pyfreerdpnative --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.32.2
+pip install pyfreerdpnative --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.33.0
 pip install .            # this package
 pip install numpy pillow # getDisplay() as an array / image
 pip install ManyQt       # optional, for the GUI
